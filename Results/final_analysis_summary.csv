@@ -1,0 +1,17 @@
+Metric,Value
+Analysis period,2020-01-01 05:00:00 to 2025-08-13 10:00:00
+Daytime hours,24504
+Model trained on simulation R²,0.2104
+Capacity scale factor,0.0077
+Average actual power (kWh),565.07
+Average ideal power (kWh),173.20
+Average performance ratio,-15.1580
+Median performance ratio,1.2730
+Average deficit (kWh),-391.87
+Average deficit (%),1615.80
+Total energy deficit (MWh),-9602.42
+Degradation rate (kWh/day),-0.0202
+Degradation rate (kWh/year),-7.39
+Degradation rate (%/year),-0.36
+Anomalies detected,1
+Anomaly rate (%),0.00

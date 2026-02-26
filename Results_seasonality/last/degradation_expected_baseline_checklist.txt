@@ -1,0 +1,7 @@
+Pipeline checklist (expected-reference degradation)
+Inputs: SolarMeterReadings1hour_cleaned_v2.csv, Solcast (Bundoora), simulation CSVs
+1) E_expected(t) = XGBoost(Solcast+time -> sim grid_power) per meter, or load simulated_power_2020_2025.csv
+2) Per-meter calibration: E_expected_cal = a*E_expected + b on analysis_valid only
+3) PI(t) = actual / (E_expected_cal + eps) on analysis_valid; optional: drop days with outage rate > 10%
+4) Monthly median PI -> linear trend -> slope = degradation %/year
+5) QC: exclude meters with valid coverage < 15.0%
