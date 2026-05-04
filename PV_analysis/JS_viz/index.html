@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Solar dashboards — PV_analysis (JS)</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
+</head>
+<body>
+  <header class="header">
+    <h1>Solar dashboards</h1>
+    <p class="hint">
+      Mirrors the Streamlit tabs (<strong>Difference</strong>, <strong>Daily</strong>, <strong>Series</strong>, <strong>Fleet</strong>)
+      using <code>PV_analysis/data_for_viz/*.csv</code>, plus <strong>Library (PVLib)</strong> and
+      <strong>7-day forecast</strong> (<code>forecast_7d_combined_library.csv</code> from the XGBoost + Azure script).
+      The <strong>Difference</strong> tab includes a full-width <strong>health ratio (H)</strong> chart plus <strong>forecast</strong> charts;
+      forecast needs a Real baseline (<code>legacy_expected_kwh</code> and/or loadable <code>data_pvlib/expected_power_pvlib_cleaned_v2.csv</code>).
+      <strong>Serving (recommended):</strong> from the repo, run
+      <code>python PV_analysis/serve_js_dashboard.py</code> — it always uses the <code>PV_analysis</code> folder as the
+      web root, then open <strong><code>http://127.0.0.1:8080/JS_viz/</code></strong>.
+      A 404 on that link almost always means the server was started in the <em>wrong</em> directory: e.g. if you run
+      <code>python -m http.server</code> from the repo root, <code>/JS_viz/</code> does not exist (you would need
+      <code>/PV_analysis/JS_viz/</code> instead). The helper script avoids that mismatch.
+    </p>
+    <div class="controls">
+      <span id="load-status" style="color:#94a3b8;font-size:0.85rem;">Starting…</span>
+      <label>From <input type="date" id="global-date-from" /></label>
+      <label>To <input type="date" id="global-date-to" /></label>
+      <button type="button" id="global-apply" class="btn btn-primary">Apply</button>
+      <button type="button" id="preset-week" class="btn btn-secondary">1 Week</button>
+      <button type="button" id="preset-month" class="btn btn-secondary">1 Month</button>
+      <button type="button" id="preset-quarter" class="btn btn-secondary">3 Months</button>
+      <button type="button" id="preset-all" class="btn btn-secondary">Full range</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button type="button" data-tab="difference" class="active">1 · Difference</button>
+    <button type="button" data-tab="powerbi">2 · Daily (PowerBI-style)</button>
+    <button type="button" data-tab="series">3 · Series viewer</button>
+    <button type="button" data-tab="fleet">4 · Fleet trend</button>
+    <button type="button" data-tab="library">5 · Library (PVLib chart)</button>
+    <button type="button" data-tab="forecast">6 · 7-day forecast</button>
+  </nav>
+
+  <main>
+    <section id="panel-difference" class="panel active"></section>
+    <section id="panel-powerbi" class="panel"></section>
+    <section id="panel-series" class="panel"></section>
+    <section id="panel-fleet" class="panel"></section>
+    <section id="panel-library" class="panel"></section>
+    <section id="panel-forecast" class="panel"></section>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

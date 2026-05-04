@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Library Solar Power — Actual vs Expected</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }
+    .header {
+      background: #1e293b;
+      padding: 16px 24px;
+      border-bottom: 1px solid #334155;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .header h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #f8fafc;
+    }
+    .header .subtitle {
+      font-size: 0.85rem;
+      color: #94a3b8;
+    }
+    .controls {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .controls label {
+      font-size: 0.8rem;
+      color: #94a3b8;
+    }
+    .controls input[type="date"] {
+      background: #0f172a;
+      border: 1px solid #475569;
+      color: #e2e8f0;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+    }
+    .controls button {
+      background: #3b82f6;
+      color: #fff;
+      border: none;
+      padding: 6px 16px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .controls button:hover { background: #2563eb; }
+    .controls button.secondary {
+      background: #334155;
+    }
+    .controls button.secondary:hover { background: #475569; }
+    #chart { width: 100%; height: calc(100vh - 140px); }
+    .stats-bar {
+      background: #1e293b;
+      padding: 10px 24px;
+      display: flex;
+      gap: 32px;
+      flex-wrap: wrap;
+      border-bottom: 1px solid #334155;
+      font-size: 0.82rem;
+    }
+    .stat { display: flex; gap: 6px; align-items: center; }
+    .stat .label { color: #94a3b8; }
+    .stat .value { color: #f8fafc; font-weight: 600; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    .dot-actual { background: #22c55e; }
+    .dot-old { background: #f97316; }
+    .dot-pvlib { background: #3b82f6; }
+    .loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 80vh;
+      font-size: 1.2rem;
+      color: #94a3b8;
+    }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>Library (L) — Hourly Solar Power Comparison</h1>
+    <div class="subtitle">La Trobe Bundoora · 384.12 kWp · 1164 panels · 4×SE82.8K inverters</div>
+  </div>
+  <div class="controls">
+    <label>From</label>
+    <input type="date" id="dateFrom" value="2021-01-01">
+    <label>To</label>
+    <input type="date" id="dateTo" value="2021-01-31">
+    <button onclick="applyRange()">Apply</button>
+    <button class="secondary" onclick="showPreset('week')">1 Week</button>
+    <button class="secondary" onclick="showPreset('month')">1 Month</button>
+    <button class="secondary" onclick="showPreset('quarter')">3 Months</button>
+    <button class="secondary" onclick="showPreset('all')">Full Year</button>
+  </div>
+</div>
+
+<div class="stats-bar" id="statsBar">
+  <div class="stat"><span class="dot dot-actual"></span><span class="label">Actual</span></div>
+  <div class="stat"><span class="dot dot-old"></span><span class="label">Old Expected</span></div>
+  <div class="stat"><span class="dot dot-pvlib"></span><span class="label">PVLib Expected</span></div>
+  <div class="stat"><span class="label">Visible hours:</span><span class="value" id="statHours">—</span></div>
+  <div class="stat"><span class="label">Σ Actual:</span><span class="value" id="statActual">—</span></div>
+  <div class="stat"><span class="label">Σ Old Exp:</span><span class="value" id="statOld">—</span></div>
+  <div class="stat"><span class="label">Σ PVLib Exp:</span><span class="value" id="statPvlib">—</span></div>
+</div>
+
+<div id="chart"><div class="loading" id="loadingMsg">Loading chart data …</div></div>
+
+<script>
+let DATA = null;
+
+async function loadData() {
+  try {
+    const resp = await fetch('chart_data.json');
+    if (!resp.ok) throw new Error('chart_data.json not found');
+    DATA = await resp.json();
+    document.getElementById('loadingMsg').textContent = 'Rendering chart …';
+    initChart();
+  } catch (e) {
+    document.getElementById('loadingMsg').textContent =
+      'Error: ' + e.message + '. Run prepare_chart_data.py first.';
+  }
+}
+
+function initChart() {
+  const traces = [
+    {
+      x: DATA.timestamp,
+      y: DATA.actual_kwh,
+      name: 'Actual Power (kWh)',
+      type: 'scatter',
+      mode: 'lines',
+      line: { color: '#22c55e', width: 1.5 },
+      hovertemplate: '<b>Actual</b>: %{y:.1f} kWh<br>%{x}<extra></extra>',
+    },
+    {
+      x: DATA.timestamp,
+      y: DATA.old_expected_kwh,
+      name: 'Old Expected (kWh)',
+      type: 'scatter',
+      mode: 'lines',
+      line: { color: '#f97316', width: 1.5, dash: 'dot' },
+      hovertemplate: '<b>Old Expected</b>: %{y:.1f} kWh<br>%{x}<extra></extra>',
+    },
+    {
+      x: DATA.timestamp,
+      y: DATA.pvlib_expected_kwh,
+      name: 'PVLib Expected (kWh)',
+      type: 'scatter',
+      mode: 'lines',
+      line: { color: '#3b82f6', width: 1.5 },
+      hovertemplate: '<b>PVLib Expected</b>: %{y:.1f} kWh<br>%{x}<extra></extra>',
+    },
+  ];
+
+  const layout = {
+    paper_bgcolor: '#0f172a',
+    plot_bgcolor: '#0f172a',
+    font: { color: '#e2e8f0', family: 'inherit' },
+    margin: { t: 10, r: 30, b: 50, l: 60 },
+    xaxis: {
+      type: 'date',
+      range: ['2021-01-01', '2021-01-31'],
+      gridcolor: '#1e293b',
+      linecolor: '#334155',
+      rangeslider: { visible: true, bgcolor: '#1e293b', thickness: 0.08 },
+    },
+    yaxis: {
+      title: { text: 'Energy (kWh)', standoff: 10 },
+      gridcolor: '#1e293b',
+      linecolor: '#334155',
+      zeroline: false,
+    },
+    legend: {
+      orientation: 'h',
+      yanchor: 'bottom',
+      y: 1.02,
+      xanchor: 'center',
+      x: 0.5,
+      bgcolor: 'rgba(0,0,0,0)',
+    },
+    hovermode: 'x unified',
+    dragmode: 'zoom',
+  };
+
+  const cfgPlotly = {
+    displayModeBar: true,
+    modeBarButtonsToAdd: ['drawline', 'drawrect', 'eraseshape'],
+    displaylogo: false,
+    responsive: true,
+    toImageButtonOptions: {
+      format: 'png',
+      filename: 'library_power_comparison',
+      width: 1920,
+      height: 900,
+    },
+  };
+
+  Plotly.newPlot('chart', traces, layout, cfgPlotly);
+
+  document.getElementById('chart').on('plotly_relayout', function (ev) {
+    let x0 = ev['xaxis.range[0]'] || ev['xaxis.range']?.[0];
+    let x1 = ev['xaxis.range[1]'] || ev['xaxis.range']?.[1];
+    if (x0 && x1) updateStats(x0, x1);
+  });
+
+  updateStats('2021-01-01', '2021-01-31');
+}
+
+function updateStats(from, to) {
+  if (!DATA) return;
+  const d0 = new Date(from), d1 = new Date(to);
+  let sumA = 0, sumO = 0, sumP = 0, count = 0;
+  for (let i = 0; i < DATA.timestamp.length; i++) {
+    const t = new Date(DATA.timestamp[i]);
+    if (t >= d0 && t <= d1) {
+      sumA += DATA.actual_kwh[i] || 0;
+      sumO += DATA.old_expected_kwh[i] || 0;
+      sumP += DATA.pvlib_expected_kwh[i] || 0;
+      count++;
+    }
+  }
+  document.getElementById('statHours').textContent = count.toLocaleString();
+  document.getElementById('statActual').textContent = (sumA / 1000).toFixed(1) + ' MWh';
+  document.getElementById('statOld').textContent = (sumO / 1000).toFixed(1) + ' MWh';
+  document.getElementById('statPvlib').textContent = (sumP / 1000).toFixed(1) + ' MWh';
+}
+
+function applyRange() {
+  const from = document.getElementById('dateFrom').value;
+  const to = document.getElementById('dateTo').value;
+  if (!from || !to) return;
+  Plotly.relayout('chart', { 'xaxis.range': [from, to] });
+  updateStats(from, to);
+}
+
+function showPreset(preset) {
+  let from = '2021-01-01', to = '2021-12-31';
+  if (preset === 'week')    { from = '2021-01-01'; to = '2021-01-08'; }
+  if (preset === 'month')   { from = '2021-01-01'; to = '2021-02-01'; }
+  if (preset === 'quarter') { from = '2021-01-01'; to = '2021-04-01'; }
+  document.getElementById('dateFrom').value = from;
+  document.getElementById('dateTo').value = to;
+  Plotly.relayout('chart', { 'xaxis.range': [from, to] });
+  updateStats(from, to);
+}
+
+loadData();
+</script>
+
+</body>
+</html>

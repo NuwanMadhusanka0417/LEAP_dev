@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Inspect cleaned meter data</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      margin: 0;
+      padding: 16px 20px 32px;
+    }
+    h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 8px 0; }
+    .hint {
+      color: #94a3b8;
+      font-size: 0.82rem;
+      max-width: 920px;
+      line-height: 1.45;
+      margin-bottom: 14px;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 14px;
+      margin-bottom: 12px;
+    }
+    label { font-size: 0.85rem; color: #94a3b8; }
+    select, input[type="date"], button {
+      background: #1e293b;
+      border: 1px solid #475569;
+      color: #e2e8f0;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+    }
+    button {
+      background: #3b82f6;
+      border: none;
+      cursor: pointer;
+    }
+    button:hover { background: #2563eb; }
+    #plot {
+      width: 100%;
+      height: min(72vh, 640px);
+      min-height: 360px;
+    }
+    #status { font-size: 0.8rem; color: #64748b; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h1>Cleaned meter QC</h1>
+  <p class="hint">
+    Data file: <code>PV_analysis/data_cleaned/SolarMeterReadings1hour_cleaned.csv</code> (same folder as this page).
+    Browsers often block <code>file://</code> fetches — run
+    <code>python PV_analysis/serve_js_dashboard.py</code> from the repo and open
+    <strong><code>http://127.0.0.1:8080/data_cleaned/inspect_cleaned.html</code></strong>
+    (port may vary). Orange = ≥3 consecutive hours with the same reading (within float tolerance). Re-run <code>1_data_cleaning.py</code> after updates — hard cap clipping is default; use <code>--redistribute-cap-plateaus</code> to smooth flat cap segments when GHI varies.
+  </p>
+  <div class="controls">
+    <label>Meter <select id="meter"></select></label>
+    <label>From <input type="date" id="d0" /></label>
+    <label>To <input type="date" id="d1" /></label>
+    <button type="button" id="draw">Plot</button>
+    <label><input type="checkbox" id="showSuspect" checked /> Suspect plateaus (≥3h)</label>
+  </div>
+  <div id="plot"></div>
+  <p id="status">Starting…</p>
+  <script type="module" src="inspect_cleaned_meter.js"></script>
+</body>
+</html>
