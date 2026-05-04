@@ -12,7 +12,7 @@
  *   Spring  Sep–Nov
  */
 import { plotlyDarkTheme, nextPlotDomId, purgePlotlyInContainer,
-         PLOTLY_STATIC, rollingMedian7Trailing, linearRegression }
+         PLOTLY_STATIC, linearRegression }
   from "./utils.js";
 
 const SEASONS = [
@@ -78,110 +78,270 @@ function yearlyMedians(pts) {
 
 // ─── chart ──────────────────────────────────────────────────────────────────
 
-function xRange(minDay, maxDay, theme) {
-  const span = Math.max(1, Math.round(
-    (new Date(maxDay + "T23:59:59") - new Date(minDay + "T00:00:00")) / 86400000));
-  let dtick, tickformat = "%b %Y";
-  if (span <= 45)        { dtick = 7 * 86400000;  tickformat = "%d %b"; }
-  else if (span <= 120)  { dtick = 14 * 86400000; tickformat = "%d %b"; }
-  else if (span <= 400)  { dtick = "M1";           tickformat = "%b '%y"; }
-  else if (span <= 800)  { dtick = "M2"; }
-  else                   { dtick = "M3"; }
-  return { ...theme, type: "date", autorange: false,
-    range: [minDay + "T00:00:00", maxDay + "T23:59:59"],
-    tickformat, ...(dtick ? { dtick } : {}) };
-}
+/** Linear x zones: first season-year centre at 61, spacing 46 (matches 2020→61 … 2025→291). */
+const YEAR_CENTER_STEP = 46;
+const YEAR_CENTER_FIRST = 61;
+const SEASON_SPAN = 40;
+const X_RANGE_PAD = 23;
 
 function buildChart(s, pts, w, h) {
-  const days  = pts.map((p) => p.day);
   const hvals = pts.map((p) => p.H);
-  const med7  = rollingMedian7Trailing(hvals);
   const ymeds = yearlyMedians(pts);
   const overall = medianOf(hvals.filter(Number.isFinite));
+  const dayCount = pts.length;
 
-  let slope = NaN, intercept = NaN, degradPct = NaN;
-  let rDates = [], rY = [];
+  const byYear = new Map();
+  for (const p of pts) {
+    if (!byYear.has(p.yr)) byYear.set(p.yr, []);
+    byYear.get(p.yr).push(p);
+  }
+  const sortedYears = [...byYear.keys()].sort((a, b) => a - b);
+  const yearCenterX = {};
+  sortedYears.forEach((yr, i) => {
+    yearCenterX[yr] = YEAR_CENTER_FIRST + i * YEAR_CENTER_STEP;
+  });
+
+  const tickvals = sortedYears.map((yr) => yearCenterX[yr]);
+  const ticktext = sortedYears.map(String);
+  const firstC = tickvals[0];
+  const lastC = tickvals[tickvals.length - 1];
+  const xRange = [
+    firstC - SEASON_SPAN / 2 - X_RANGE_PAD,
+    lastC + SEASON_SPAN / 2 + X_RANGE_PAD,
+  ];
+
+  let slopeYear = NaN, interceptYear = NaN, degradPct = NaN;
   if (ymeds.length >= 2) {
-    const xs = ymeds.map((_, i) => i);
-    const ys = ymeds.map((d) => d.med);
-    ({ slope, intercept } = linearRegression(xs, ys));
-    if (Number.isFinite(slope) && Number.isFinite(intercept)) {
-      if (ymeds[0].med > 0) degradPct = (slope / ymeds[0].med) * 100;
-      rDates = xs.map((x) => `${ymeds[0].yr + x}-${String(s.midM).padStart(2,"0")}-15T12:00:00`);
-      rY = xs.map((x) => slope * x + intercept);
-    }
+    const xsYr = ymeds.map((d) => d.yr);
+    const ysMed = ymeds.map((d) => d.med);
+    ({ slope: slopeYear, intercept: interceptYear } = linearRegression(xsYr, ysMed));
+    if (Number.isFinite(slopeYear) && Number.isFinite(interceptYear) && ymeds[0].med > 0)
+      degradPct = (slopeYear / ymeds[0].med) * 100;
   }
 
-  const mDates = ymeds.map((d) => `${d.yr}-${String(s.midM).padStart(2,"0")}-15T12:00:00`);
-  const mVals  = ymeds.map((d) => d.med);
-
   const traces = [
-    { x: days, y: hvals, mode: "markers", type: "scatter", name: "Daily H",
-      marker: { color: s.color, size: 5, opacity: 0.55 } },
-    { x: days, y: med7, mode: "lines", type: "scatter", name: "7-day median",
-      line: { color: "#fb923c", width: 2 }, connectgaps: false },
+    {
+      x: [null],
+      y: [null],
+      type: "scatter",
+      mode: "markers",
+      name: "Daily H",
+      marker: { color: s.color, size: 6, opacity: 0.75 },
+      showlegend: true,
+      hoverinfo: "skip",
+    },
   ];
-  if (mDates.length) traces.push({
-    x: mDates, y: mVals, mode: "markers+text", type: "scatter", name: "Annual median",
-    marker: { color: "#ffffff", size: 9, symbol: "diamond",
-               line: { color: "#334155", width: 1.5 } },
-    text: mVals.map((v) => v.toFixed(2)), textposition: "top center",
-    textfont: { color: "#e2e8f0", size: 10 },
-  });
-  if (rDates.length >= 2) traces.push({
-    x: rDates, y: rY, mode: "lines", type: "scatter", name: "Trend",
-    line: { color: "#f87171", width: 2, dash: "dash" },
-  });
+
+  for (const yr of sortedYears) {
+    const yearPts = [...byYear.get(yr)].sort((a, b) => a.day.localeCompare(b.day));
+    const totalDaysInThatYear = Math.max(yearPts.length, 1);
+    const xc = yearCenterX[yr];
+    const xs = yearPts.map((p, dayOfSeason) =>
+      xc -
+      SEASON_SPAN / 2 +
+      (dayOfSeason / totalDaysInThatYear) * SEASON_SPAN);
+    const ys = yearPts.map((p) => p.H);
+    const text = yearPts.map((p) => p.day);
+    traces.push({
+      x: xs,
+      y: ys,
+      type: "scatter",
+      mode: "lines+markers",
+      name: `${yr}`,
+      line: { color: s.color, width: 1.2 },
+      marker: {
+        color: s.color,
+        size: 5,
+        opacity: 0.75,
+        line: { width: 0 },
+      },
+      opacity: 0.85,
+      showlegend: false,
+      hovertemplate: "%{text}<br>H = %{y:.3f}<extra></extra>",
+      text,
+    });
+  }
+
+  if (Number.isFinite(overall)) {
+    traces.push({
+      x: [xRange[0], xRange[1]],
+      y: [overall, overall],
+      type: "scatter",
+      mode: "lines",
+      name: "Season median H",
+      line: { color: "#2dd4bf", width: 1.5, dash: "dot" },
+      hovertemplate: `Season median H = ${overall.toFixed(3)}<extra></extra>`,
+      showlegend: true,
+    });
+  }
+
+  const medX = ymeds.map((d) => yearCenterX[d.yr]);
+  const medY = ymeds.map((d) => d.med);
+  if (medX.length) {
+    traces.push({
+      x: medX,
+      y: medY,
+      type: "scatter",
+      mode: "lines+markers",
+      name: "Annual median",
+      line: { color: "#fb923c", width: 1.8 },
+      marker: {
+        symbol: "diamond",
+        size: 8,
+        color: "white",
+        line: { color: "#64748b", width: 1 },
+      },
+      text: ymeds.map((d) => `${d.yr}: H=${d.med.toFixed(2)}`),
+      hovertemplate: "%{text}<extra></extra>",
+      showlegend: true,
+    });
+  }
+
+  if (
+    ymeds.length >= 2 &&
+    Number.isFinite(slopeYear) &&
+    Number.isFinite(interceptYear)
+  ) {
+    const tx = ymeds.map((d) => yearCenterX[d.yr]);
+    const ty = ymeds.map((d) => slopeYear * d.yr + interceptYear);
+    traces.push({
+      x: tx,
+      y: ty,
+      type: "scatter",
+      mode: "lines",
+      name: "Trend (annual medians)",
+      line: { color: "#f87171", width: 1.4, dash: "dash" },
+      showlegend: true,
+      hoverinfo: "skip",
+    });
+  }
+
+  const shapes = [
+    {
+      type: "line",
+      xref: "paper",
+      yref: "y",
+      x0: 0,
+      x1: 1,
+      y0: 1.0,
+      y1: 1.0,
+      line: { color: "#94a3b8", width: 1, dash: "dash" },
+    },
+    {
+      type: "line",
+      xref: "paper",
+      yref: "y",
+      x0: 0,
+      x1: 1,
+      y0: 0.9,
+      y1: 0.9,
+      line: { color: "#475569", width: 1, dash: "dot" },
+    },
+  ];
+  for (let i = 0; i < sortedYears.length - 1; i++) {
+    const xb =
+      (yearCenterX[sortedYears[i]] + yearCenterX[sortedYears[i + 1]]) / 2;
+    shapes.push({
+      type: "line",
+      xref: "x",
+      yref: "paper",
+      x0: xb,
+      x1: xb,
+      y0: 0,
+      y1: 1,
+      line: { color: "#1e293b", width: 0.5 },
+    });
+  }
 
   const theme = plotlyDarkTheme();
   const layout = {
     ...theme,
-    title: { text: s.label, font: { color: s.color, size: 14 },
-             x: 0, xanchor: "left", y: 0.98, yanchor: "top" },
-    xaxis: xRange(days[0], days[days.length - 1], theme.xaxis),
+    title: {
+      text: s.label,
+      font: { color: s.color, size: 14 },
+      x: 0,
+      xanchor: "left",
+      y: 0.98,
+      yanchor: "top",
+    },
+    xaxis: {
+      ...theme.xaxis,
+      type: "linear",
+      autorange: false,
+      range: xRange,
+      tickmode: "array",
+      tickvals,
+      ticktext,
+      showgrid: false,
+      gridcolor: "#1e293b",
+      linecolor: "#334155",
+    },
     yaxis: { ...theme.yaxis, title: "H", range: [0, 1.5], autorange: false },
-    shapes: [
-      { type:"line", xref:"paper", yref:"y", x0:0, x1:1, y0:1.0, y1:1.0,
-        line:{ color:"#94a3b8", width:1, dash:"dash" } },
-      { type:"line", xref:"paper", yref:"y", x0:0, x1:1, y0:0.9, y1:0.9,
-        line:{ color:"#475569", width:1, dash:"dot"  } },
-    ],
-    annotations: [
-      { xref:"paper", yref:"y", x:1, y:1.0, xanchor:"right", yanchor:"bottom",
-        text:"H=1.0", showarrow:false, font:{ color:"#94a3b8", size:9 } },
-      { xref:"paper", yref:"y", x:1, y:0.9, xanchor:"right", yanchor:"bottom",
-        text:"H=0.9", showarrow:false, font:{ color:"#475569", size:9 } },
-    ],
-    legend: { x:1, xanchor:"right", y:1, bgcolor:"rgba(15,23,42,0.7)",
-              font:{ color:"#e2e8f0", size:10 } },
-    margin: { t:40, r:28, b:56, l:56 },
-    hovermode: "x unified", showlegend: true,
-    autosize: false, width: w, height: h,
+    shapes,
+    legend: {
+      x: 1,
+      xanchor: "right",
+      y: 1,
+      yanchor: "top",
+      bgcolor: "rgba(15,23,42,0.82)",
+      bordercolor: "#334155",
+      borderwidth: 1,
+      font: { color: "#e2e8f0", size: 9 },
+    },
+    margin: { t: 32, r: 12, b: 40, l: 48 },
+    hovermode: "closest",
+    showlegend: true,
+    autosize: false,
+    width: w,
+    height: h,
   };
 
-  return { traces, layout, overall, degradPct, ymeds };
+  return { traces, layout, overall, degradPct, ymeds, dayCount };
 }
 
-// ─── degradation stat bar ────────────────────────────────────────────────────
+function formatTrendPct(pct) {
+  if (!Number.isFinite(pct)) return "N/A";
+  const abs = Math.abs(pct).toFixed(2);
+  return pct < 0 ? `\u2212${abs}` : `+${abs}`;
+}
 
-function degradBar(res) {
-  const { overall, degradPct, ymeds } = res;
+/** Compact stats block below each season chart: summary row + per-year medians. */
+function seasonChartFooter(res) {
+  const { overall, degradPct, dayCount, ymeds } = res;
   const medStr = Number.isFinite(overall) ? overall.toFixed(3) : "N/A";
-  let dc = "#94a3b8", arrow = "≈", dStr = "N/A";
+
+  let badgeStyle =
+    "background:#1e293b;color:#94a3b8";
+  let trendStr = "Degradation N/A";
   if (Number.isFinite(degradPct)) {
-    const sign = degradPct >= 0 ? "+" : "";
-    dStr = `${sign}${degradPct.toFixed(2)}%/yr`;
-    if (degradPct < -0.5) { dc = "#f87171"; arrow = "▼"; }
-    else if (degradPct > 0.5) { dc = "#4ade80"; arrow = "▲"; }
+    const pctPart = `${formatTrendPct(degradPct)}/yr`;
+    if (degradPct < -0.5) {
+      badgeStyle = "background:#fef2f2;color:#b91c1c";
+      trendStr = `Degradation \u25bc ${pctPart}`;
+    } else if (degradPct > 0.5) {
+      badgeStyle = "background:#f0fdf4;color:#15803d";
+      trendStr = `Degradation \u25b2 ${pctPart}`;
+    } else {
+      trendStr = `Degradation \u2248 ${pctPart}`;
+    }
   }
-  const detail = ymeds.map((d) => `${d.yr}: ${d.med.toFixed(2)} (n=${d.n})`).join("  ·  ");
-  return `<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;
-    padding:10px 16px;margin:4px 0 28px;font-size:0.82rem;
-    display:flex;flex-wrap:wrap;gap:8px 24px;align-items:center">
-    <span style="color:#94a3b8">Median H: <strong style="color:#e2e8f0">${medStr}</strong></span>
-    <span style="color:#94a3b8">Degradation:
-      <strong style="color:${dc};font-size:1rem"> ${arrow} ${dStr}</strong></span>
-    <span style="color:#64748b;font-size:0.78rem">${detail}</span>
+
+  const detail =
+    ymeds && ymeds.length
+      ? ymeds.map((d) => `${d.yr}: ${d.med.toFixed(2)} (n=${d.n})`).join(" · ")
+      : "";
+
+  return `<div style="margin-top:2px">
+    <div style="display:flex;gap:12px 14px;align-items:center;flex-wrap:wrap;font-size:12px;
+                color:#94a3b8;line-height:1.35">
+      <span>Median H: <strong style="color:#e2e8f0">${medStr}</strong></span>
+      <span style="${badgeStyle};font-size:11px;padding:2px 8px;border-radius:4px;
+                  font-weight:500;">${trendStr}</span>
+      <span>${dayCount} days</span>
+    </div>
+    ${detail ? `<div style="margin-top:4px;padding:6px 8px;background:#1e293b;
+      border:1px solid #334155;border-radius:6px;font-size:11px;color:#94a3b8;
+      line-height:1.4">${detail}</div>` : ""}
   </div>`;
 }
 
@@ -249,19 +409,25 @@ export function renderSeasonPerf(container, hourly) {
   const sumId = nextPlotDomId("sp-summary");
 
   const counts = SEASONS.map((s) => `${s.label.split(" ")[0]}: ${(groups.get(s.id)||[]).length}d`).join(" · ");
+  /** Matches Plotly layout height; overrides global `.chart-box` 400px + margin-bottom. */
+  const plotH = 280;
 
   container.innerHTML = `<div style="padding:16px">
-    <p style="font-size:0.78rem;color:#64748b;margin:0 0 16px">
+    <p style="font-size:0.78rem;color:#64748b;margin:0 0 14px">
       H = Σ Actual ÷ Σ PVLib expected · daylight hours (GHI &gt; 5 W/m²) ·
       <strong style="color:#e2e8f0">${dailyH.length.toLocaleString()}</strong> day-records ·
       ${counts}
     </p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px 18px;align-items:start">
     ${SEASONS.map((s) => `
-      <h3 style="color:${s.color};margin:24px 0 6px;font-size:1rem">${s.label}</h3>
-      <div id="${pids[s.id]}" class="chart-box"></div>
-      <div id="${dids[s.id]}"></div>
+      <div style="min-width:0">
+        <h3 style="color:${s.color};margin:0 0 6px;font-size:0.95rem">${s.label}</h3>
+        <div id="${pids[s.id]}" class="chart-box" style="height:${plotH}px;min-height:${plotH}px;margin-bottom:0;width:100%"></div>
+        <div id="${dids[s.id]}"></div>
+      </div>
     `).join("")}
-    <h3 style="margin:28px 0 8px;font-size:0.9rem;color:#cbd5e1;
+    </div>
+    <h3 style="margin:22px 0 8px;font-size:0.9rem;color:#cbd5e1;
                border-top:1px solid #334155;padding-top:12px">Summary</h3>
     <div id="${sumId}"></div>
   </div>`;
@@ -270,8 +436,12 @@ export function renderSeasonPerf(container, hourly) {
   // avoids requestAnimationFrame timing issues that plagued earlier versions.
   void container.offsetWidth;
 
-  const w = Math.max(320, (container.clientWidth || 960) - 32);
-  const h = 400;
+  const padOuter = 32;
+  const gridGap = 18;
+  const cw = Math.max(480, container.clientWidth || 960);
+  const inner = cw - padOuter;
+  const w = Math.max(260, Math.floor((inner - gridGap) / 2));
+  const h = plotH;
   const results = new Map();
 
   for (const s of SEASONS) {
@@ -292,7 +462,7 @@ export function renderSeasonPerf(container, hourly) {
       const res = buildChart(s, pts, w, h);
       results.set(s.id, res);
       Plotly.newPlot(plotDiv, res.traces, res.layout, PLOTLY_STATIC);
-      if (degDiv) degDiv.innerHTML = degradBar(res);
+      if (degDiv) degDiv.innerHTML = seasonChartFooter(res);
     } catch (err) {
       console.error("[SeasonPerf]", s.label, err);
       if (plotDiv)
