@@ -13,6 +13,7 @@ import { renderPowerBIDaily } from "./tab_powerbi_daily.js";
 import { renderSeries } from "./tab_series.js";
 import { renderFleet } from "./tab_fleet.js";
 import { renderLibraryPVLib } from "./tab_library_pvlib.js";
+import { renderSeasonPerf } from "./tab_season_perf.js";
 import { renderForecast } from "./tab_forecast.js";
 
 const PRECOMPUTED_PVLIB_HOURLY = "expected_power_pvlib_cleaned_v2.csv";
@@ -231,6 +232,8 @@ function showTab(id) {
       state.hourly,
       rangeCtx
     );
+  } else if (id === "seasonperf") {
+    renderSeasonPerf(document.getElementById("panel-seasonperf"), state.hourly);
   } else if (id === "forecast") {
     renderForecast(
       document.getElementById("panel-forecast"),

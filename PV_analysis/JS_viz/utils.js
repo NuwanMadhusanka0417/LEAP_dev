@@ -39,15 +39,15 @@ export function purgeAllPlotlyInRoot(root) {
  * bumps a generation counter so an older scheduled callback is skipped — otherwise
  * Plotly can run on replaced DOM and corrupt axes/traces after switching tabs.
  */
-export function runAfterTabLayout(panelEl, fn) {
+export function runAfterTabLayout(panelEl, fn, opts = {}) {
   if (!panelEl || typeof fn !== "function") return;
   const gen = (panelEl.__plotLayoutGen = (panelEl.__plotLayoutGen || 0) + 1);
+  const requireActive = opts.requireActive !== false;
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       if (panelEl.__plotLayoutGen !== gen) return;
       if (!panelEl.isConnected) return;
-      // Tab switched away before draw: skip (next visit re-renders).
-      if (!panelEl.classList.contains("active")) return;
+      if (requireActive && !panelEl.classList.contains("active")) return;
       fn();
     });
   });
