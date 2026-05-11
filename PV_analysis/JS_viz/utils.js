@@ -294,7 +294,7 @@ export function nanPercentile(arr, p) {
 /**
  * Return a new theme object for every Plotly.newPlot/react call.
  * Plotly mutates layout (including axis objects) in place; sharing `PLOTLY_DARK.yaxis`
- * across tabs corrupts axes after e.g. Fleet’s horizontal bar chart runs.
+ * across tabs corrupts axes after some Plotly layouts mutate nested axis objects.
  */
 export function plotlyDarkTheme() {
   return {

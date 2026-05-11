@@ -1,11 +1,10 @@
 /**
- * Difference tab: PVLib daily diff + health ratio (H) + forecast.
+ * Difference tab: PVLib daily diff + health ratio (H).
  * H = daytime Σ Actual ÷ Σ PVLib expected (GHI > 5). Full-width analytics chart.
  * Data: hourly_library_master.csv (expected_kwh, actual_kwh, ghi_wm2).
  */
 import {
   rollingMedian7Trailing,
-  rollingMedian7Centered,
   plotlyDarkTheme,
   nextPlotDomId,
   purgePlotlyInContainer,
@@ -61,62 +60,6 @@ function daylightDailyForHealth(hourlyFiltered) {
     sim.push(o.sim);
   }
   return { days, act, sim };
-}
-
-function ceilToHourLocal(d) {
-  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), 0, 0, 0);
-  if (d.getTime() > x.getTime()) x.setHours(x.getHours() + 1);
-  return x;
-}
-
-function buildForecastSlice(hourly, horizonDays) {
-  if (!hourly.length) return null;
-  let lastTs = null;
-  for (let i = hourly.length - 1; i >= 0; i--) {
-    if (Number.isFinite(hourly[i].actual)) {
-      lastTs = hourly[i].ts;
-      break;
-    }
-  }
-  if (!lastTs) lastTs = hourly[hourly.length - 1].ts;
-  const startTs = ceilToHourLocal(lastTs);
-  const endMs = startTs.getTime() + horizonDays * 86400000;
-  const slice = hourly.filter((r) => r.ts.getTime() >= startTs.getTime() && r.ts.getTime() < endMs);
-  if (!slice.length) return null;
-  const hasPred = slice.some(
-    (r) => Number.isFinite(r.expected) || Number.isFinite(r.legacy)
-  );
-  if (!hasPred) return null;
-  return { slice, startTs, endMs };
-}
-
-function forecastDayShapes(slice) {
-  const shapes = [];
-  let i = 0;
-  while (i < slice.length) {
-    const day = slice[i].ghi > 5;
-    let j = i;
-    while (j < slice.length && (slice[j].ghi > 5) === day) j++;
-    if (day && j > i) {
-      const x0 = slice[i].tsStr.replace(" ", "T");
-      const x1 = slice[j - 1].tsStr.replace(" ", "T");
-      shapes.push({
-        type: "rect",
-        xref: "x",
-        yref: "paper",
-        x0,
-        x1,
-        y0: 0,
-        y1: 1,
-        fillcolor: "#38bdf8",
-        opacity: 0.06,
-        line: { width: 0 },
-        layer: "below",
-      });
-    }
-    i = j;
-  }
-  return shapes;
 }
 
 let _lastDiffRender = null;
@@ -233,23 +176,12 @@ export function renderDifference(container, hourly, dateFrom, dateTo) {
   const anaH = daylightDailyForHealth(hFiltered);
   const H = anaH.sim.map((s, i) => (s > 0 ? anaH.act[i] / s : NaN));
   const H7 = rollingMedian7Trailing(H, 3);
-  const hasLegacy = hourly.some((r) => Number.isFinite(r.legacy));
-
-  const horizonSelId = "diff-fc-horizon";
-  let horizonDays = 7;
-  const existingSel = container.querySelector(`#${horizonSelId}`);
-  if (existingSel) horizonDays = Math.min(14, Math.max(3, parseInt(existingSel.value, 10) || 7));
-
-  const fc = buildForecastSlice(hourly, horizonDays);
 
   purgePlotlyInContainer(container);
   const ids = {
     ghi: nextPlotDomId("plot-diff-ghi"),
     bars: nextPlotDomId("plot-diff-bars"),
     h: nextPlotDomId("plot-ana-h"),
-    fc1: nextPlotDomId("plot-fc-daily"),
-    fc2: nextPlotDomId("plot-fc-hourly"),
-    fc3: nextPlotDomId("plot-fc-cum"),
   };
 
   container.innerHTML = `
@@ -269,42 +201,7 @@ export function renderDifference(container, hourly, dateFrom, dateTo) {
       </div>
       <div id="${ids.h}" class="chart-box chart-box--health-wide"></div>
     </div>
-
-    <h3>Next few days — forecast (model: Real vs Simulated)</h3>
-    <p class="note controls-inline">
-      <label>Forecast horizon (days)
-        <select id="${horizonSelId}">
-          ${[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
-            .map(
-              (n) =>
-                `<option value="${n}" ${n === horizonDays ? "selected" : ""}>${n}</option>`
-            )
-            .join("")}
-        </select>
-      </label>
-    </p>
-    <div id="diff-fc-caption" class="note"></div>
-    <div class="chart-grid-3">
-      <div id="${ids.fc1}" class="chart-box chart-box--compact"></div>
-      <div id="${ids.fc2}" class="chart-box chart-box--compact"></div>
-      <div id="${ids.fc3}" class="chart-box chart-box--compact"></div>
-    </div>
   `;
-
-  const sel = container.querySelector(`#${horizonSelId}`);
-  if (sel && !sel.dataset.bound) {
-    sel.dataset.bound = "1";
-    sel.addEventListener("change", () => {
-      if (_lastDiffRender) {
-        renderDifference(
-          _lastDiffRender.container,
-          _lastDiffRender.hourly,
-          _lastDiffRender.dateFrom,
-          _lastDiffRender.dateTo
-        );
-      }
-    });
-  }
 
   for (const id of ["ana-h-from", "ana-h-to"]) {
     const el = container.querySelector(`#${id}`);
@@ -326,7 +223,6 @@ export function renderDifference(container, hourly, dateFrom, dateTo) {
   const barPos = diff.map((v) => (v > 0 ? v : 0));
   const barNeg = diff.map((v) => (v < 0 ? v : 0));
   const marginDiff = { t: 36, r: 20, b: 56, l: 56 };
-  const marginSmall = { t: 32, r: 16, b: 48, l: 48 };
 
   runAfterTabLayout(container, () => {
     const themeG = plotlyDarkTheme();
@@ -521,200 +417,5 @@ export function renderDifference(container, hourly, dateFrom, dateTo) {
         );
       }
     }
-
-    const capEl = container.querySelector("#diff-fc-caption");
-    const elFc1 = document.getElementById(ids.fc1);
-    const elFc2 = document.getElementById(ids.fc2);
-    const elFc3 = document.getElementById(ids.fc3);
-
-    if (!fc || !hasLegacy || !elFc1 || !elFc2 || !elFc3) {
-      if (capEl) {
-        capEl.innerHTML = !hasLegacy
-          ? "Forecast charts need a Real baseline: <code>legacy_expected_kwh</code> in the hourly CSV and/or a loadable <code>data_pvlib/expected_power_pvlib_cleaned_v2.csv</code> (same origin as this page)."
-          : !fc
-            ? "No hourly rows in the selected forecast window after the last actual reading."
-            : "";
-      }
-      return;
-    }
-
-    const s = fc.slice;
-    const gapH = s.map((r) =>
-      Number.isFinite(r.legacy) && Number.isFinite(r.expected)
-        ? r.expected - r.legacy
-        : NaN
-    );
-    const gapMed7h = rollingMedian7Centered(gapH, 1);
-    let cum = 0;
-    const cumGap = gapH.map((g) => {
-      cum += Number.isFinite(g) ? g : 0;
-      return cum;
-    });
-
-    const byD = new Map();
-    for (const r of s) {
-      const d = r.day;
-      if (!byD.has(d)) byD.set(d, { real: 0, sim: 0 });
-      const o = byD.get(d);
-      if (Number.isFinite(r.legacy)) o.real += r.legacy;
-      if (Number.isFinite(r.expected)) o.sim += r.expected;
-    }
-    const fcDays = [...byD.keys()].sort();
-    const realD = fcDays.map((d) => byD.get(d).real);
-    const simD = fcDays.map((d) => byD.get(d).sim);
-    const pctDiff = fcDays.map((_, i) =>
-      simD[i] > 0 ? (100 * (realD[i] - simD[i])) / simD[i] : NaN
-    );
-
-    const weeklyReal = realD.reduce((a, b) => a + b, 0);
-    const weeklySim = simD.reduce((a, b) => a + b, 0);
-    const weeklyDiff = weeklySim - weeklyReal;
-    const weeklyPcnt = weeklyReal ? (100 * weeklyDiff) / weeklyReal : NaN;
-    const endTs = new Date(fc.endMs - 3600000);
-
-    if (capEl) {
-      capEl.innerHTML = `Forecast window: <strong>${fc.startTs.getFullYear()}-${String(fc.startTs.getMonth() + 1).padStart(2, "0")}-${String(fc.startTs.getDate()).padStart(2, "0")} ${String(fc.startTs.getHours()).padStart(2, "0")}:00</strong> → <strong>${endTs.getFullYear()}-${String(endTs.getMonth() + 1).padStart(2, "0")}-${String(endTs.getDate()).padStart(2, "0")} ${String(endTs.getHours()).padStart(2, "0")}:00</strong><br/>
-        Totals: Real = <strong>${weeklyReal.toFixed(1)}</strong> kWh, Simulated = <strong>${weeklySim.toFixed(1)}</strong> kWh
-        (Δ = <strong>${weeklyDiff >= 0 ? "+" : ""}${weeklyDiff.toFixed(1)}</strong> kWh, <strong>${weeklyPcnt >= 0 ? "+" : ""}${weeklyPcnt.toFixed(1)}%</strong>).`;
-    }
-
-    const xBar = fcDays.map((d) => {
-      const [y, m, day] = d.split("-");
-      const mo = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][parseInt(m, 10) - 1];
-      return `${mo} ${parseInt(day, 10)}`;
-    });
-
-    const barTraces = [
-      {
-        x: xBar,
-        y: realD,
-        name: "Model (Real)",
-        type: "bar",
-        marker: { color: "#3b82f6" },
-      },
-      {
-        x: xBar,
-        y: simD,
-        name: "Model (Simulated)",
-        type: "bar",
-        marker: { color: "#fb923c" },
-      },
-    ];
-    const annotations = [];
-    for (let i = 0; i < fcDays.length; i++) {
-      const p = pctDiff[i];
-      if (!Number.isFinite(p)) continue;
-      const hi = Math.max(realD[i], simD[i]);
-      annotations.push({
-        x: xBar[i],
-        y: hi * 1.02 + (hi > 0 ? 0 : 0.02),
-        text: `${p >= 0 ? "+" : ""}${p.toFixed(0)}%`,
-        showarrow: false,
-        font: { color: "#e2e8f0", size: 11 },
-      });
-    }
-
-    Plotly.newPlot(
-      elFc1,
-      barTraces,
-      {
-        ...themeA,
-        margin: marginSmall,
-        barmode: "group",
-        title: "Daily energy — next days",
-        yaxis: { ...themeA.yaxis, title: "Daily energy (kWh)" },
-        xaxis: { ...themeA.xaxis, title: "Date" },
-        annotations,
-        showlegend: true,
-        autosize: false,
-        width: measureChartBox(container, elFc1).width,
-        height: 320,
-      },
-      PLOTLY_STATIC
-    );
-
-    const xHour = s.map((r) => r.tsStr.replace(" ", "T"));
-    const fcShapes = forecastDayShapes(s);
-
-    Plotly.newPlot(
-      elFc2,
-      [
-        {
-          x: xHour,
-          y: gapH,
-          name: "Hourly gap (Sim − Real)",
-          type: "scatter",
-          mode: "markers",
-          marker: { color: "#3b82f6", size: 5, opacity: 0.55 },
-        },
-        {
-          x: xHour,
-          y: gapMed7h,
-          name: "7-hour median",
-          type: "scatter",
-          mode: "lines",
-          line: { color: "#fb923c", width: 2 },
-        },
-      ],
-      {
-        ...themeA,
-        margin: marginSmall,
-        shapes: [
-          ...fcShapes,
-          {
-            type: "line",
-            x0: xHour[0],
-            x1: xHour[xHour.length - 1],
-            y0: 0,
-            y1: 0,
-            line: { dash: "dash", color: "#64748b" },
-          },
-        ],
-        title: "Hourly gap (Simulated − Real)",
-        yaxis: { ...themeA.yaxis, title: "Gap (kWh)" },
-        showlegend: true,
-        hovermode: "x unified",
-        autosize: false,
-        width: measureChartBox(container, elFc2).width,
-        height: 320,
-      },
-      PLOTLY_STATIC
-    );
-
-    Plotly.newPlot(
-      elFc3,
-      [
-        {
-          x: xHour,
-          y: cumGap,
-          name: "Cumulative gap",
-          type: "scatter",
-          mode: "lines",
-          line: { color: "#fb923c", width: 2 },
-        },
-      ],
-      {
-        ...themeA,
-        margin: marginSmall,
-        shapes: [
-          {
-            type: "line",
-            x0: xHour[0],
-            x1: xHour[xHour.length - 1],
-            y0: 0,
-            y1: 0,
-            line: { dash: "dash", color: "#64748b" },
-          },
-        ],
-        title: "Cumulative difference — Simulated vs Real",
-        yaxis: { ...themeA.yaxis, title: "Cumulative gap (kWh)" },
-        showlegend: false,
-        hovermode: "x unified",
-        autosize: false,
-        width: measureChartBox(container, elFc3).width,
-        height: 320,
-      },
-      PLOTLY_STATIC
-    );
   });
 }

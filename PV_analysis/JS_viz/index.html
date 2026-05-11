@@ -11,11 +11,10 @@
   <header class="header">
     <h1>Solar dashboards</h1>
     <p class="hint">
-      Mirrors the Streamlit tabs (<strong>Difference</strong>, <strong>Daily</strong>, <strong>Series</strong>, <strong>Fleet</strong>)
+      Mirrors core Streamlit-style views (<strong>Daily</strong>, <strong>Difference</strong>)
       using <code>PV_analysis/data_for_viz/*.csv</code>, plus <strong>Library (PVLib)</strong> and
       <strong>7-day forecast</strong> (<code>forecast_7d_combined_library.csv</code> from the XGBoost + Azure script).
-      The <strong>Difference</strong> tab includes a full-width <strong>health ratio (H)</strong> chart plus <strong>forecast</strong> charts;
-      forecast needs a Real baseline (<code>legacy_expected_kwh</code> and/or loadable <code>data_pvlib/expected_power_pvlib_cleaned_v2.csv</code>).
+      The <strong>Difference</strong> tab adds daylight-only difference plots plus a full-width <strong>health ratio (H)</strong> chart.
       <strong>Serving (recommended):</strong> from the repo, run
       <code>python PV_analysis/serve_js_dashboard.py</code> — it always uses the <code>PV_analysis</code> folder as the
       web root, then open <strong><code>http://127.0.0.1:8080/JS_viz/</code></strong>.
@@ -36,22 +35,22 @@
   </header>
 
   <nav class="tabs">
-    <button type="button" data-tab="difference" class="active">1 · Difference</button>
-    <button type="button" data-tab="powerbi">2 · Daily (PowerBI-style)</button>
-    <button type="button" data-tab="series">3 · Series viewer</button>
-    <button type="button" data-tab="fleet">4 · Fleet trend</button>
-    <button type="button" data-tab="library">5 · Library (PVLib chart)</button>
-    <button type="button" data-tab="seasonperf">6 · Season Analysis</button>
+    <button type="button" data-tab="powerbi" class="active">1 · Daily (PowerBI-style)</button>
+    <button type="button" data-tab="difference">2 · Difference</button>
+    <button type="button" data-tab="library">3 · Library (PVLib chart)</button>
+    <button type="button" data-tab="seasonperf">4 · Season Analysis</button>
+    <button type="button" data-tab="seasonirr">5 · Season + irradiance</button>
+    <button type="button" data-tab="degradation">6 · Meter degradation</button>
     <button type="button" data-tab="forecast">7 · 7-day forecast</button>
   </nav>
 
   <main>
-    <section id="panel-difference" class="panel active"></section>
-    <section id="panel-powerbi" class="panel"></section>
-    <section id="panel-series" class="panel"></section>
-    <section id="panel-fleet" class="panel"></section>
+    <section id="panel-powerbi" class="panel active"></section>
+    <section id="panel-difference" class="panel"></section>
     <section id="panel-library" class="panel"></section>
     <section id="panel-seasonperf" class="panel"></section>
+    <section id="panel-seasonirr" class="panel"></section>
+    <section id="panel-degradation" class="panel"></section>
     <section id="panel-forecast" class="panel"></section>
   </main>
 

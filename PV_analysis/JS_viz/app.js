@@ -10,17 +10,16 @@ import {
 } from "./utils.js";
 import { renderDifference } from "./tab_difference.js";
 import { renderPowerBIDaily } from "./tab_powerbi_daily.js";
-import { renderSeries } from "./tab_series.js";
-import { renderFleet } from "./tab_fleet.js";
 import { renderLibraryPVLib } from "./tab_library_pvlib.js";
 import { renderSeasonPerf } from "./tab_season_perf.js";
+import { renderSeasonIrradiance } from "./tab_season_irradiance.js";
+import { renderMeterDegradation } from "./tab_degradation.js";
 import { renderForecast } from "./tab_forecast.js";
 
 const PRECOMPUTED_PVLIB_HOURLY = "expected_power_pvlib_cleaned_v2.csv";
 
 let state = {
   hourly: [],
-  kpiRows: [],
   /** Rows from forecast_7d_combined_library.csv (PVLib vs XGBoost 7d window). */
   forecastCombined: [],
   dateFrom: "",
@@ -126,16 +125,6 @@ function normalizeForecastCombined(rows) {
   return out.sort((a, b) => a.ts - b.ts);
 }
 
-function normalizeKpi(rows) {
-  return rows.map((r) => ({
-    meter_id: r.meter_id,
-    building_name: r.building_name,
-    system_kwp: r.system_kwp,
-    actual_over_expected_ratio: r.actual_over_expected_ratio,
-    correlation_actual_vs_pvlib: r.correlation_actual_vs_pvlib,
-  }));
-}
-
 function setDateBoundsAndDefault() {
   if (!state.hourly.length) return;
   const days = state.hourly.map((r) => r.day);
@@ -192,7 +181,7 @@ function applyGlobalPreset(preset) {
   showTab(activeTab);
 }
 
-let activeTab = "difference";
+let activeTab = "powerbi";
 
 function showTab(id) {
   activeTab = id;
@@ -218,14 +207,10 @@ function showTab(id) {
     dataMax: state.dataMax,
   };
 
-  if (id === "difference") {
-    renderDifference(document.getElementById("panel-difference"), state.hourly, df, dt);
-  } else if (id === "powerbi") {
+  if (id === "powerbi") {
     renderPowerBIDaily(document.getElementById("panel-powerbi"), state.hourly, df, dt);
-  } else if (id === "series") {
-    renderSeries(document.getElementById("panel-series"), state.hourly, df, dt);
-  } else if (id === "fleet") {
-    renderFleet(document.getElementById("panel-fleet"), state.hourly, state.kpiRows, df, dt);
+  } else if (id === "difference") {
+    renderDifference(document.getElementById("panel-difference"), state.hourly, df, dt);
   } else if (id === "library") {
     renderLibraryPVLib(
       document.getElementById("panel-library"),
@@ -234,6 +219,18 @@ function showTab(id) {
     );
   } else if (id === "seasonperf") {
     renderSeasonPerf(document.getElementById("panel-seasonperf"), state.hourly);
+  } else if (id === "seasonirr") {
+    renderSeasonIrradiance(
+      document.getElementById("panel-seasonirr"),
+      state.hourly,
+    );
+  } else if (id === "degradation") {
+    renderMeterDegradation(
+      document.getElementById("panel-degradation"),
+      state.hourly,
+      df,
+      dt,
+    );
   } else if (id === "forecast") {
     renderForecast(
       document.getElementById("panel-forecast"),
@@ -263,14 +260,6 @@ async function init() {
     refreshSecondModelFlag();
 
     try {
-      const { text: kpiText } = await fetchDataVizFile("library_kpis_summary.csv");
-      const { rows: kRows } = parseCSV(kpiText);
-      state.kpiRows = normalizeKpi(kRows);
-    } catch {
-      state.kpiRows = [];
-    }
-
-    try {
       const { text: fcText } = await fetchDataVizFile(
         "forecast_7d_combined_library.csv"
       );
@@ -283,7 +272,7 @@ async function init() {
     if (!state.hourly.length) throw new Error("No rows in hourly_library_master.csv");
 
     setDateBoundsAndDefault();
-    status.textContent = `Loaded ${state.hourly.length.toLocaleString()} hourly rows · ${state.kpiRows.length} KPI row(s)${
+    status.textContent = `Loaded ${state.hourly.length.toLocaleString()} hourly rows${
       state.forecastCombined.length
         ? ` · Forecast: ${state.forecastCombined.length} h`
         : " · Forecast CSV: not found"
@@ -308,7 +297,7 @@ async function init() {
     document.getElementById("preset-quarter").addEventListener("click", () => applyGlobalPreset("quarter"));
     document.getElementById("preset-all").addEventListener("click", () => applyGlobalPreset("all"));
 
-    showTab("difference");
+    showTab("powerbi");
   } catch (e) {
     status.textContent = "Error: " + e.message;
     console.error(e);
