@@ -24,9 +24,12 @@ def main() -> None:
     if not (ROOT / "JS_viz" / "index.html").is_file():
         print("ERROR: Expected JS_viz/index.html next to this script.", file=sys.stderr)
         sys.exit(1)
-    if not (ROOT / "data_for_viz" / "hourly_library_master.csv").is_file():
+    viz = ROOT / "data_for_viz"
+    if not viz.is_dir():
+        print("WARNING: data_for_viz/ not found — run scripts 1–2 first.", file=sys.stderr)
+    elif not any(viz.glob("hourly_*_master.csv")):
         print(
-            "WARNING: data_for_viz/hourly_library_master.csv not found — charts will fail until it exists.",
+            "WARNING: no hourly_*_master.csv in data_for_viz — run 2_build_library_analysis_outputs.py.",
             file=sys.stderr,
         )
 

@@ -1,18 +1,16 @@
 /**
- * Same visualization as pvlib_based/chart/library_power_chart.html
- * — actual vs old expected vs PVLib expected.
- * Loads optional ../data_for_viz/library_chart_data.json; if missing, builds two-series
- * chart from hourly CSV (no legacy "old expected" column in master file).
+ * Hourly actual vs PVLib expected (and optional legacy expected from master CSV).
+ * Data comes from the selected meter's hourly_*_master.csv via app.js — not a shared JSON file.
  */
 import {
   plotlyDarkTheme,
-  tryFetchDataVizFile,
   nextPlotDomId,
   purgePlotlyInContainer,
   runAfterTabLayout,
   measureChartBox,
   PLOTLY_STATIC,
 } from "./utils.js";
+import { siteHeading } from "./meters.js";
 
 function updateStats(DATA, from, to) {
   const d0 = new Date(from);
@@ -60,31 +58,19 @@ function addMonths(isoStr, n) {
 export async function renderLibraryPVLib(container, hourly, rangeCtx = {}) {
   purgePlotlyInContainer(container);
 
-  let DATA = null;
-
-  const jsonRes = await tryFetchDataVizFile("library_chart_data.json");
-  if (jsonRes) {
-    try {
-      DATA = JSON.parse(jsonRes.text);
-    } catch {
-      DATA = null;
-    }
-  }
-
-  if (!DATA || !DATA.timestamp?.length) {
-    const t = hourly.map((r) => r.tsStr);
-    DATA = {
-      timestamp: t,
-      actual_kwh: hourly.map((r) => r.actual),
-      old_expected_kwh: hourly.map(() => null),
-      pvlib_expected_kwh: hourly.map((r) => r.expected),
-    };
-  }
+  const DATA = {
+    timestamp: hourly.map((r) => r.tsStr),
+    actual_kwh: hourly.map((r) => r.actual),
+    old_expected_kwh: hourly.map((r) =>
+      Number.isFinite(r.legacy) ? r.legacy : null
+    ),
+    pvlib_expected_kwh: hourly.map((r) => r.expected),
+  };
 
   const plotLibId = nextPlotDomId("plot-library-main");
   container.innerHTML = `
-    <h2>Library — actual vs expected (PVLib chart)</h2>
-    <p class="note">Three-way compare needs <code>data_for_viz/library_chart_data.json</code> (from <code>pvlib_based/chart/prepare_chart_data.py</code> or copy). Otherwise only actual + PVLib from hourly master are shown.</p>
+    <h2>${siteHeading("Actual vs expected (PVLib chart)", rangeCtx.site)}</h2>
+    <p class="note">Uses <code>hourly_*_master.csv</code> for the meter selected in the header. A third “old expected” series appears only if that column exists in the master file.</p>
     <div class="controls" style="margin-bottom:12px;">
       <label>From <input type="date" id="lib-date-from" /></label>
       <label>To <input type="date" id="lib-date-to" /></label>

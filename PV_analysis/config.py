@@ -4,8 +4,10 @@ Site and PV system defaults — edit for your as-built array.
 All input CSVs live under ``PV_analysis/data_cleaned/``.
 Visualization / pipeline outputs go to ``PV_analysis/data_for_viz/``.
 
-Building-specific parameters (DC capacity, inverter AC limit) are loaded
-from ``panel_data.csv`` (prefers ``data_cleaned/``, else ``data_pvlib/``).
+Building-specific parameters (DC capacity, inverter AC limit, optional PVLib
+tilt/azimuth) are loaded from ``panel_data.csv`` (prefers ``data_cleaned/``,
+else ``data_pvlib/``). Tilt/azimuth for known keys are overridden by
+``_BUILDING_PVLIB_GEOMETRY``.
 
 Global PVLib fallbacks (``SYSTEM_DC_W``, ``INVERTER_AC_W``) match **Library (L)**
 from ``panel_data.csv`` so ``3_expected_power_pvlib.py`` without ``--building``
@@ -46,10 +48,28 @@ LONGITUDE = 145.0454
 ALTITUDE_M = 85.0
 TIMEZONE = "Australia/Melbourne"
 
-# Library (L) as-built: 10° tilt, north-facing. PVLib: surface_azimuth 0° = north (clockwise from north).
-# Other campus arrays can differ; this global default matches library expected-power modelling.
+# Default PVLib plane orientation when a meter key has no entry in _BUILDING_PVLIB_GEOMETRY.
+# PVLib: surface_azimuth clockwise from north (0° = north, 180° = south).
 SURFACE_TILT_DEG = 10.0
 SURFACE_AZIMUTH_DEG = 0.0
+
+# Per-meter overrides (tilt°, azimuth°). Library, DMW, DW: 10° tilt, 180° azimuth (south-facing plane).
+_BUILDING_PVLIB_GEOMETRY: dict[str, tuple[float, float]] = {
+    "library": (10.0, 180.0),
+    "dmw": (10.0, 180.0),
+    "dw": (10.0, 180.0),
+}
+
+
+def surface_geometry_for_meter_key(meter_key: str) -> tuple[float, float]:
+    """Return (surface_tilt_deg, surface_azimuth_deg) for PVLib POA modelling."""
+    key = meter_key.strip().lower()
+    return _BUILDING_PVLIB_GEOMETRY.get(key, (SURFACE_TILT_DEG, SURFACE_AZIMUTH_DEG))
+
+
+def analysis_meter_keys() -> list[str]:
+    """Short meter keys for ``2_build_library_analysis_outputs.py`` (edit ``_BUILDING_PVLIB_GEOMETRY``)."""
+    return sorted(_BUILDING_PVLIB_GEOMETRY.keys())
 
 # ── Library (L) catalogue row (panel_data.csv) — primary site for library analysis ──
 # kWp 384.12 | 1164 × Trina 330W | 4 × SolarEdge SE82.8K | Bundoora
@@ -122,7 +142,7 @@ def _parse_inverter_kw(text: str) -> float:
 
 
 def get_building_config(meter_key: str) -> dict:
-    """Return {system_dc_w, inverter_ac_w, building_name} for a meter key.
+    """Return DC/AC nameplate, PVLib tilt/azimuth, and metadata for a meter key.
 
     ``meter_key`` is the short name used in the meter CSV, e.g. "library",
     "bg", "hs1".  Raises ``ValueError`` if the building is not found in
@@ -155,6 +175,8 @@ def get_building_config(meter_key: str) -> dict:
     except (ValueError, TypeError):
         no_panels = None
 
+    surf_tilt, surf_az = surface_geometry_for_meter_key(key)
+
     return {
         "building_name": row["Building"].strip(),
         "network": str(row.get("Network", "")).strip(),
@@ -168,4 +190,6 @@ def get_building_config(meter_key: str) -> dict:
         "inverter_type": str(row.get("Inverter", "")).strip(),
         "optimisers": str(row.get("Optimsiers", "")).strip(),
         "meter_key_full": f"solar.bun_{key}#realenergyintotheload#kwh",
+        "surface_tilt_deg": surf_tilt,
+        "surface_azimuth_deg": surf_az,
     }

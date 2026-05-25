@@ -13,6 +13,7 @@ import {
   PLOTLY_STATIC,
   linearRegression,
 } from "./utils.js";
+import { siteHeading } from "./meters.js";
 
 function daylightDailySums(hourlyFiltered) {
   const byDay = new Map();
@@ -127,7 +128,7 @@ function plotlyXaxisDayRange(fromDay, toDay, themeX) {
   };
 }
 
-export function renderDifference(container, hourly, dateFrom, dateTo) {
+export function renderDifference(container, hourly, dateFrom, dateTo, site = {}) {
   const bounds = dayBounds(hourly);
   const hourlyKey = hourly.length ? `${hourly[0].day}|${hourly[hourly.length - 1].day}|${hourly.length}` : "";
 
@@ -185,7 +186,7 @@ export function renderDifference(container, hourly, dateFrom, dateTo) {
   };
 
   container.innerHTML = `
-    <h2>Difference (PVLib expected − actual)</h2>
+    <h2>${siteHeading("Difference (PVLib expected − actual)", site)}</h2>
     <p class="note">Daylight-only daily sums (hours with GHI &gt; 5 W/m²). Slope: <strong>${
       Number.isFinite(slope) ? slope.toFixed(2) : "—"
     }</strong> kWh/day · ΣDiff: <strong>${totalDiff.toFixed(0)}</strong> kWh</p>

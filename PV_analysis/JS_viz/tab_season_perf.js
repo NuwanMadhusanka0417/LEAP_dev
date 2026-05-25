@@ -68,7 +68,7 @@ function buildHChart(s, pts, w, h) {
  * @param {HTMLElement} container  – the panel element
  * @param {Array}       hourly     – normalised rows from app.js (full dataset)
  */
-export function renderSeasonPerf(container, hourly) {
+export function renderSeasonPerf(container, hourly, site = {}) {
   purgePlotlyInContainer(container);
 
   if (!hourly || !hourly.length) {
@@ -95,10 +95,13 @@ export function renderSeasonPerf(container, hourly) {
 
   const counts = SEASONS.map((s) => `${s.label.split(" ")[0]}: ${(groups.get(s.id)||[]).length}d`).join(" · ");
   const plotH = 280;
+  const siteLine = site?.label
+    ? `<strong style="color:#e2e8f0">${site.label}</strong> · `
+    : "";
 
   container.innerHTML = `<div style="padding:16px">
     <p style="font-size:0.78rem;color:#64748b;margin:0 0 14px">
-      H = Σ Actual ÷ Σ PVLib expected · daylight hours (GHI &gt; 5 W/m²) ·
+      ${siteLine}H = Σ Actual ÷ Σ PVLib expected · daylight hours (GHI &gt; 5 W/m²) ·
       <strong style="color:#e2e8f0">${dailyH.length.toLocaleString()}</strong> day-records ·
       ${counts}
     </p>

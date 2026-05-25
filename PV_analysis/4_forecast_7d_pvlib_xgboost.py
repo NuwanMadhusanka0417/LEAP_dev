@@ -2,36 +2,34 @@
 """
 7-day hourly PV generation: PVLib physics + XGBoost trained on past weather + meter.
 
+Processes every meter key in ``config._BUILDING_PVLIB_GEOMETRY`` (via
+``config.analysis_meter_keys()``) unless ``--building-key`` selects one site.
+
 **Training:** historical cleaned Solcast (local CSV) + hourly meter readings where timestamps overlap.
 
-**Forecast (--azure-live):** loads live Solcast blobs from Azure (same pattern as ``forecasting.ipynb``).
-By default the **first forecast hour** is the hour **after** the last timestamp in the viz merge file
-``{out_dir}/hourly_{building}_master.csv`` (e.g. ``hourly_library_master.csv`` for ``--building-key library``),
-matching the dashboard hourly series; if that file is missing, the hour after the last row in ``--meter-csv``
-is used. Override with ``--forecast-start``. PVLib and XGBoost use **only** that 168 h live-weather window.
+**Forecast window (default):** 168 hours starting at **00:00 on the calendar day after** the
+last meter reading for **that** meter (from cleaned meter CSV and ``hourly_{key}_master.csv``).
+Not anchored to the Solcast CSV end. Use ``--backtest`` only for evaluation on the weather tail.
 
-**Credentials:** matches ``forecasting.ipynb`` — a default SAS is embedded so ``--azure-live`` runs without
-setup. Prefer overriding with ``AZURE_STORAGE_SAS_TOKEN`` (and rotate the notebook token if this repo is shared).
-
-  AZURE_STORAGE_SAS_TOKEN        (optional; overrides embedded default)
-  AZURE_STORAGE_ACCOUNT_URL      (default: https://leapdata.blob.core.windows.net)
-  AZURE_STORAGE_CONTAINER        (default: solar-forecasts-solcast)
-
-Outputs in ``PV_analysis/data_for_viz/`` (unless ``--out-dir``):
+Outputs in ``data_for_viz/`` per key ``<key>``:
   forecast_7d_pvlib_{key}.csv, forecast_7d_xgboost_{key}.csv,
   forecast_7d_combined_{key}.csv, forecast_7d_run_meta_{key}.csv
 
+Legacy: ``forecast_7d_combined_library.csv`` when ``library`` is processed.
+
 Usage::
-  pip install xgboost scikit-learn azure-storage-blob
   cd PV_analysis
-  python 4_forecast_7d_pvlib_xgboost.py --building-key library --azure-live --campus BUNDOORA
-  python 4_forecast_7d_pvlib_xgboost.py --building-key library --backtest   # local CSV only
+  python 4_forecast_7d_pvlib_xgboost.py --azure-live --campus BUNDOORA
+  python 4_forecast_7d_pvlib_xgboost.py
+  python 4_forecast_7d_pvlib_xgboost.py --backtest
+  python 4_forecast_7d_pvlib_xgboost.py --building-key dmw
 """
 from __future__ import annotations
 
 import argparse
 import importlib.util
 import os
+import sys
 from io import StringIO
 from pathlib import Path
 
@@ -59,7 +57,6 @@ FORECAST_HOURS = 168
 DEFAULT_AZURE_ACCOUNT_URL = "https://leapdata.blob.core.windows.net"
 DEFAULT_AZURE_CONTAINER = "solar-forecasts-solcast"
 
-# Same value as forecasting.ipynb BlobServiceClient credential=…; env AZURE_STORAGE_SAS_TOKEN overrides.
 _DEFAULT_AZURE_SAS_FROM_NOTEBOOK = (
     "UmQIm94uLMGZkl8vOie0B1omByZBzJmP6tNodMe9HVHlgWAgprw2OX62wXCZqmJ4jAH04IBlfM5xNukhc3x9rQ=="
 )
@@ -87,7 +84,6 @@ def _load_weather_local(path: str) -> pd.DataFrame:
 
 
 def _ensure_pvlib_weather_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure ghi, dni, dhi, air_temp exist (names as expected by build_expected)."""
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
@@ -125,7 +121,6 @@ def load_solcast_live_from_azure(
     campus: str,
     live_min_timestamp: str | None = None,
 ) -> pd.DataFrame:
-    """Load and merge 'live' CSV blobs; same idea as forecasting.ipynb (without storing secrets in repo)."""
     try:
         from azure.storage.blob import BlobServiceClient
     except ImportError as e:
@@ -148,7 +143,6 @@ def load_solcast_live_from_azure(
     dataframes = []
     for name in csv_files:
         blob_client = container_client.get_blob_client(name)
-        # Older azure-storage-blob: content_as_text() has no ``errors=`` kwarg; decode bytes explicitly.
         raw = blob_client.download_blob().readall()
         text = raw.decode("utf-8", errors="replace")
         temp_df = pd.read_csv(StringIO(text))
@@ -261,40 +255,143 @@ def _feature_matrix(base: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     return parts, feature_names
 
 
-def _resolve_forecast_window_local(
-    weather: pd.DataFrame,
-    meter_max: pd.Timestamp,
+def _last_reading_from_meter_df(meter_df: pd.DataFrame) -> pd.Timestamp:
+    m = meter_df.copy()
+    m["actual_kwh"] = pd.to_numeric(m["actual_kwh"], errors="coerce")
+    valid = m[m["actual_kwh"].notna()]
+    if valid.empty:
+        raise ValueError("No meter readings found in meter CSV for this meter")
+    return pd.Timestamp(valid["timestamp"].max())
+
+
+def _last_reading_from_hourly_master(
+    path: str,
     *,
-    backtest: bool,
-    forward: bool,
-    forecast_start_arg: str | None,
-) -> tuple[pd.Timestamp, pd.Timestamp, str]:
-    w = weather["timestamp"].sort_values()
-    w_min, w_max = w.iloc[0], w.iloc[-1]
+    meter_key: str,
+    building_key: str,
+) -> pd.Timestamp | None:
+    df = pd.read_csv(path, parse_dates=["timestamp"], low_memory=False)
+    if "meter_id" in df.columns:
+        mk = str(meter_key).strip()
+        df = df[df["meter_id"].astype(str).str.strip() == mk]
+    elif "building_key" in df.columns:
+        bk = building_key.strip().lower()
+        df = df[df["building_key"].astype(str).str.strip().str.lower() == bk]
+    if df.empty or "timestamp" not in df.columns:
+        return None
+    if "actual_kwh" in df.columns:
+        actual = pd.to_numeric(df["actual_kwh"], errors="coerce")
+        with_data = df[actual.notna()]
+        if not with_data.empty:
+            return pd.Timestamp(with_data["timestamp"].max())
+    return pd.Timestamp(df["timestamp"].max())
 
-    if forecast_start_arg:
-        fs = pd.to_datetime(forecast_start_arg)
-        mode = "explicit"
-    elif forward:
-        fs = pd.Timestamp(meter_max).floor("h") + pd.Timedelta(hours=1)
-        mode = "forward"
-    else:
-        fs = pd.Timestamp(w_max).floor("h") - pd.Timedelta(hours=FORECAST_HOURS - 1)
-        mode = "backtest"
 
-    fe = fs + pd.Timedelta(hours=FORECAST_HOURS)
+def _resolve_per_meter_forecast_start(
+    *,
+    meter_df: pd.DataFrame,
+    hourly_master_path: str | None,
+    meter_key: str,
+    building_key: str,
+) -> tuple[pd.Timestamp, pd.Timestamp, str, str]:
+    """
+    Per-meter anchor: last reading timestamp and forecast start at midnight the next calendar day.
+    Returns (forecast_start, last_meter_reading, anchor_source, hourly_master_path_or_empty).
+    """
+    last_meter = _last_reading_from_meter_df(meter_df)
+    source = "meter_csv"
+    master_path = ""
+
+    if hourly_master_path and os.path.isfile(hourly_master_path):
+        master_last = _last_reading_from_hourly_master(
+            hourly_master_path,
+            meter_key=meter_key,
+            building_key=building_key,
+        )
+        master_path = os.path.abspath(hourly_master_path)
+        if master_last is not None and master_last > last_meter:
+            last_meter = master_last
+            source = "hourly_master"
+
+    last_day = pd.Timestamp(last_meter).normalize()
+    fs = last_day + pd.Timedelta(days=1)
+    return fs, last_meter, source, master_path
+
+
+def _backtest_forecast_start(hist_weather: pd.DataFrame) -> pd.Timestamp:
+    w_max = pd.Timestamp(hist_weather["timestamp"].max()).floor("h")
+    return w_max - pd.Timedelta(hours=FORECAST_HOURS - 1)
+
+
+def _validate_backtest_weather(hist_weather: pd.DataFrame, fs: pd.Timestamp, fe: pd.Timestamp) -> None:
+    w = hist_weather["timestamp"]
+    w_min, w_max = w.min(), w.max()
+    last_needed = fe - pd.Timedelta(hours=1)
     if fs < w_min:
         raise ValueError(f"forecast_start {fs} is before weather min {w_min}")
-    if w_max < fe - pd.Timedelta(seconds=1):
+    if w_max < last_needed:
         raise ValueError(
-            f"Weather ends at {w_max} but forecast needs hours through {fe}. "
-            "Use --backtest, shorten horizon, or provide weather that extends far enough."
+            f"Weather ends at {w_max} but backtest needs data through {last_needed} "
+            f"(last of {FORECAST_HOURS} hours ending before {fe}). "
+            "Extend the weather CSV or use default forward mode (no --backtest)."
         )
-    if forward and fs <= meter_max:
-        raise ValueError(
-            f"Forward mode: forecast_start {fs} must be after last meter time {meter_max}"
+
+
+def _slice_historical_forecast_hours(
+    weather: pd.DataFrame,
+    forecast_start: pd.Timestamp,
+    *,
+    allow_gaps: bool,
+) -> tuple[pd.DataFrame, pd.Timestamp, pd.Timestamp]:
+    """Hourly weather grid [fs, fs+168h) for local PVLib forecast."""
+    df = weather.sort_values("timestamp").copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.floor("h")
+    df = df.drop_duplicates(subset=["timestamp"], keep="last")
+
+    fs = pd.Timestamp(forecast_start).floor("h")
+    fe = fs + pd.Timedelta(hours=FORECAST_HOURS)
+    idx = pd.date_range(start=fs, periods=FORECAST_HOURS, freq="h")
+    df_idx = df.set_index("timestamp").sort_index()
+    block = df_idx.reindex(idx)
+    if block[["ghi", "dni", "dhi", "air_temp"]].isna().all(axis=None):
+        raise RuntimeError(
+            f"No historical weather overlaps forecast grid starting {fs}. "
+            "Check Solcast CSV range or use --azure-live for future hours."
         )
-    return fs, fe, mode
+
+    if allow_gaps:
+        w_max = df_idx.index.max()
+        if w_max < fe - pd.Timedelta(hours=1):
+            print(
+                f"  Note: historical weather ends {w_max}; "
+                f"forward-filling through {fe - pd.Timedelta(hours=1)} for the 7-day window."
+            )
+        block = block.interpolate(limit_direction="both")
+        block = block.ffill().bfill()
+    elif block[["ghi", "dni", "dhi", "air_temp"]].isna().any().any():
+        missing = block[block[["ghi", "dni", "dhi", "air_temp"]].isna().any(axis=1)].index
+        raise RuntimeError(
+            f"Backtest window has {len(missing)} hour(s) without weather "
+            f"(first gap {missing[0]}). Check hourly continuity in the Solcast CSV."
+        )
+
+    if block[["ghi", "dni", "dhi", "air_temp"]].isna().any().any():
+        raise RuntimeError(
+            "Could not fill all weather hours for the 7-day window; missing data after reindex."
+        )
+
+    out = block.reset_index()
+    if "timestamp" not in out.columns:
+        out = out.rename(columns={out.columns[0]: "timestamp"})
+    req = ["ghi", "dni", "dhi", "air_temp"]
+    for c in req:
+        if c not in out.columns:
+            raise ValueError(f"Weather slice missing {c}")
+    extra = [c for c in ("zenith", "wind_speed_10m", "albedo") if c in df.columns]
+    for c in extra:
+        if c not in out.columns and c in df_idx.columns:
+            out[c] = df_idx.reindex(idx)[c].values
+    return out, fs, fe
 
 
 def _align_fs_to_live_span(
@@ -304,7 +401,6 @@ def _align_fs_to_live_span(
     *,
     auto_chosen_start: bool,
 ) -> pd.Timestamp:
-    """Ensure [fs, fs + (FORECAST_HOURS-1)h] lies within [lo, hi] (hourly live feed bounds)."""
     span_needed = pd.Timedelta(hours=FORECAST_HOURS - 1)
     if hi - lo < span_needed:
         raise RuntimeError(
@@ -312,7 +408,6 @@ def _align_fs_to_live_span(
             f"need at least {FORECAST_HOURS} consecutive hours."
         )
 
-    # Match naive vs tz-aware live timestamps
     if lo.tzinfo is None and fs.tzinfo is not None:
         fs = fs.tz_localize(None)
     elif lo.tzinfo is not None and fs.tzinfo is None:
@@ -353,10 +448,8 @@ def _slice_live_forecast_hours(
     *,
     align_auto: bool = True,
 ) -> tuple[pd.DataFrame, pd.Timestamp, pd.Timestamp]:
-    """Take exactly FORECAST_HOURS rows from live weather on an hourly grid [fs, fe)."""
     df = live_weather.sort_values("timestamp").copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.floor("h")
-    # Multiple raw timestamps can map to the same hour → unique index required for reindex().
     df = df.drop_duplicates(subset=["timestamp"], keep="last")
 
     lo = df["timestamp"].min()
@@ -404,32 +497,6 @@ def _hourly_master_csv_path(building_key: str, out_dir: str) -> str:
     return os.path.join(out_dir, f"hourly_{slug}_master.csv")
 
 
-def _last_timestamp_hourly_master(path: str, meter_key: str) -> pd.Timestamp | None:
-    """Latest timestamp in viz hourly master for this meter (same file as JS dashboard)."""
-    df = pd.read_csv(path, parse_dates=["timestamp"], low_memory=False)
-    if "meter_id" in df.columns:
-        df = df[df["meter_id"].astype(str).str.strip() == str(meter_key).strip()]
-    if df.empty or "timestamp" not in df.columns:
-        return None
-    return pd.Timestamp(df["timestamp"].max())
-
-
-def _forecast_start_after_viz_or_meter(
-    *,
-    hourly_master_path: str | None,
-    meter_key: str,
-    meter_max: pd.Timestamp,
-) -> tuple[pd.Timestamp, str, str]:
-    """Return (forecast_start, anchor_label, path_or_note). Anchor = hour after last obs."""
-    if hourly_master_path and os.path.isfile(hourly_master_path):
-        last = _last_timestamp_hourly_master(hourly_master_path, meter_key)
-        if last is not None:
-            fs = last.floor("h") + pd.Timedelta(hours=1)
-            return fs, "hourly_master", os.path.abspath(hourly_master_path)
-    fs = pd.Timestamp(meter_max).floor("h") + pd.Timedelta(hours=1)
-    return fs, "meter_csv_max", ""
-
-
 def _default_campus_for_building(bldg: dict) -> str:
     c = str(bldg.get("campus", "")).strip().upper().replace(" ", "")
     if "BUNDOORA" in c or c == "BUN":
@@ -445,199 +512,13 @@ def _default_campus_for_building(bldg: dict) -> str:
     return "BUNDOORA"
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="7d PVLib + XGBoost forecast export")
-    ap.add_argument("--building-key", default="library", help="Short key, e.g. library")
-    ap.add_argument(
-        "--historical-weather-csv",
-        default=config.SOLCAST_CLEANED_V2,
-        help="Local Solcast CSV for training (PVLib + meter overlap)",
-    )
-    ap.add_argument("--meter-csv", default=config.METER_READINGS)
-    ap.add_argument("--out-dir", default=config.DATA_FOR_VIZ_DIR)
-    ap.add_argument(
-        "--forecast-start",
-        default=None,
-        help="Start of 7d window (naive local ISO). For --azure-live, default is hour after last "
-        "timestamp in hourly_{building}_master.csv (viz file) or meter CSV.",
-    )
-    ap.add_argument(
-        "--hourly-master-csv",
-        default=None,
-        help="Optional path to hourly_*_master.csv; default is {out_dir}/hourly_{building}_master.csv",
-    )
-    ap.add_argument(
-        "--forward",
-        action="store_true",
-        help="[local mode] Forecast after last meter timestamp",
-    )
-    ap.add_argument(
-        "--backtest",
-        action="store_true",
-        help="[local mode] Last 168h of historical CSV",
-    )
-    ap.add_argument(
-        "--azure-live",
-        action="store_true",
-        help="Forecast using live Solcast blobs from Azure (PVLib + XGB on that weather only)",
-    )
-    ap.add_argument(
-        "--campus",
-        default=None,
-        help="Solcast campus code for live blobs, e.g. BUNDOORA (default: from panel_data campus)",
-    )
-    ap.add_argument(
-        "--azure-account-url",
-        default=os.environ.get("AZURE_STORAGE_ACCOUNT_URL", DEFAULT_AZURE_ACCOUNT_URL),
-    )
-    ap.add_argument(
-        "--azure-container",
-        default=os.environ.get("AZURE_STORAGE_CONTAINER", DEFAULT_AZURE_CONTAINER),
-    )
-    ap.add_argument(
-        "--live-min-timestamp",
-        default=None,
-        help="Optional: drop live rows with timestamp <= this (e.g. 2024-07-13 for notebook parity)",
-    )
-    ap.add_argument("--save-model", action="store_true")
-    args = ap.parse_args()
-
-    if args.azure_live:
-        if args.forward or args.backtest:
-            ap.error("With --azure-live, do not use --forward/--backtest (local forecast modes).")
-    else:
-        if args.forward and args.backtest:
-            ap.error("Use only one of --forward or --backtest")
-        if not args.forward and not args.forecast_start:
-            args.backtest = True
-
-    bldg = config.get_building_config(args.building_key.strip().lower())
-    meter_key = bldg["meter_key_full"]
-    campus = (args.campus or _default_campus_for_building(bldg)).strip().upper()
-    os.makedirs(args.out_dir, exist_ok=True)
-
-    hourly_master_path = args.hourly_master_csv or _hourly_master_csv_path(
-        args.building_key, args.out_dir
-    )
-    forecast_anchor_source = ""
-    hourly_master_used = ""
-
-    print("Loading historical weather (training) …")
-    hist_weather = _load_weather_local(args.historical_weather_csv)
-    print(
-        f"  historical rows: {len(hist_weather):,}  "
-        f"{hist_weather['timestamp'].min()} → {hist_weather['timestamp'].max()}"
-    )
-
-    pv_mod = _import_pvlib_builder()
-    print("PVLib build_expected (historical weather) …")
-    exp_hist = pv_mod.build_expected(
-        hist_weather,
-        system_dc_w=bldg["system_dc_w"],
-        inverter_ac_w=bldg["inverter_ac_w"],
-    )
-    exp_hist = _attach_weather_extras(exp_hist, hist_weather)
-
-    print(f"Loading meter: {meter_key} …")
-    meter = _load_meter_hourly(args.meter_csv, meter_key)
-    meter_max = meter["timestamp"].max()
-    print(f"  meter rows: {len(meter):,}  max ts: {meter_max}")
-
-    merged = exp_hist.merge(meter, on="timestamp", how="inner")
-    merged_valid = merged.dropna(subset=["actual_kwh", "expected_kwh"]).copy()
-    print(f"  trainable overlap hours: {len(merged_valid):,}")
-
-    if args.azure_live:
-        sas = (os.environ.get("AZURE_STORAGE_SAS_TOKEN") or "").strip() or _DEFAULT_AZURE_SAS_FROM_NOTEBOOK
-        print(f"Loading live Solcast from Azure ({args.azure_container}) campus={campus} …")
-        live_raw = load_solcast_live_from_azure(
-            account_url=args.azure_account_url.rstrip("/"),
-            container_name=args.azure_container,
-            sas_token=sas,
-            campus=campus,
-            live_min_timestamp=args.live_min_timestamp,
-        )
-        print(
-            f"  live rows: {len(live_raw):,}  "
-            f"{live_raw['timestamp'].min()} → {live_raw['timestamp'].max()}"
-        )
-        if args.forecast_start:
-            fs_in = pd.to_datetime(args.forecast_start)
-            forecast_anchor_source = "cli"
-            align_auto = False
-            print(f"  Forecast start from --forecast-start: {fs_in}")
-        else:
-            fs_in, forecast_anchor_source, hourly_master_used = _forecast_start_after_viz_or_meter(
-                hourly_master_path=hourly_master_path,
-                meter_key=meter_key,
-                meter_max=meter_max,
-            )
-            align_auto = False
-            last_note = (
-                f"last row in {hourly_master_used}"
-                if forecast_anchor_source == "hourly_master"
-                else f"last meter row in {os.path.abspath(args.meter_csv)}"
-            )
-            print(
-                f"  Forecast anchor ({forecast_anchor_source}): {last_note} → "
-                f"first forecast hour {fs_in}"
-            )
-        live_7d, fs, fe = _slice_live_forecast_hours(
-            live_raw, fs_in, align_auto=align_auto
-        )
-        mode = "azure_live"
-        print(f"Forecast window: [{fs}, {fe})  ({FORECAST_HOURS} h)  mode={mode}")
-
-        train_df = merged_valid[merged_valid["timestamp"] < fs].copy()
-        if len(train_df) < 500:
-            raise SystemExit(
-                f"Too few training hours before forecast start ({len(train_df)}). "
-                "Use an earlier --forecast-start or ensure meter/history overlap."
-            )
-
-        print("PVLib build_expected (live 7d weather only) …")
-        forecast_exp = pv_mod.build_expected(
-            live_7d,
-            system_dc_w=bldg["system_dc_w"],
-            inverter_ac_w=bldg["inverter_ac_w"],
-        )
-        forecast_base = _attach_weather_extras(forecast_exp, live_7d)
-        weather_meta = f"azure:{args.azure_container}"
-    else:
-        fs, fe, mode = _resolve_forecast_window_local(
-            hist_weather,
-            meter_max,
-            backtest=args.backtest,
-            forward=args.forward,
-            forecast_start_arg=args.forecast_start,
-        )
-        print(f"Forecast mode: {mode}  window: [{fs}, {fe})  ({FORECAST_HOURS} h)")
-
-        train_df = merged_valid[merged_valid["timestamp"] < fs].copy()
-        if len(train_df) < 500:
-            raise SystemExit(
-                f"Too few training hours before forecast start ({len(train_df)}). "
-                "Check meter/weather overlap or use --backtest with longer history."
-            )
-
-        fcast_mask = (exp_hist["timestamp"] >= fs) & (exp_hist["timestamp"] < fe)
-        forecast_base = exp_hist.loc[fcast_mask].copy()
-        if len(forecast_base) != FORECAST_HOURS:
-            raise SystemExit(
-                f"Expected {FORECAST_HOURS} forecast hours, got {len(forecast_base)}. "
-                "Check weather continuity (hourly grid)."
-            )
-        weather_meta = os.path.abspath(args.historical_weather_csv)
-
+def _train_xgboost(train_df: pd.DataFrame) -> tuple[xgb.XGBRegressor, float]:
     X_all, _ = _feature_matrix(train_df)
     y_all = train_df["actual_kwh"].astype(float).values
-
     n = len(X_all)
     cut = max(int(n * 0.9), n - 2000)
     X_tr, X_va = X_all.iloc[:cut], X_all.iloc[cut:]
     y_tr, y_va = y_all[:cut], y_all[cut:]
-
-    print(f"Training XGBoost  (train {len(X_tr):,}  val {len(X_va):,}) …")
     model = xgb.XGBRegressor(
         n_estimators=600,
         max_depth=8,
@@ -653,6 +534,176 @@ def main() -> None:
     model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
     pred_va = model.predict(X_va)
     mae_va = float(mean_absolute_error(y_va, pred_va))
+    return model, mae_va
+
+
+def process_building_forecast(
+    building_key: str,
+    *,
+    hist_weather: pd.DataFrame,
+    pv_mod,
+    meter_csv: str,
+    out_dir: str,
+    historical_weather_csv: str,
+    azure_live: bool,
+    live_raw: pd.DataFrame | None,
+    campus_override: str | None,
+    forecast_start_arg: str | None,
+    hourly_master_csv: str | None,
+    backtest: bool,
+    azure_container: str,
+    save_model: bool,
+) -> dict:
+    key = building_key.strip().lower()
+    bldg = config.get_building_config(key)
+    meter_key = bldg["meter_key_full"]
+    campus = (campus_override or _default_campus_for_building(bldg)).strip().upper()
+
+    print(f"\n{'=' * 55}")
+    print(f"  [{key}] {bldg['building_name']}")
+    print(f"  Meter: {meter_key} | campus: {campus}")
+    print(
+        f"  DC: {bldg['system_kwp']:.2f} kWp | tilt/azimuth: "
+        f"{bldg['surface_tilt_deg']:.0f}° / {bldg['surface_azimuth_deg']:.0f}°"
+    )
+
+    exp_hist = pv_mod.build_expected(
+        hist_weather,
+        system_dc_w=bldg["system_dc_w"],
+        inverter_ac_w=bldg["inverter_ac_w"],
+        surface_tilt_deg=bldg["surface_tilt_deg"],
+        surface_azimuth_deg=bldg["surface_azimuth_deg"],
+    )
+    exp_hist = _attach_weather_extras(exp_hist, hist_weather)
+
+    meter = _load_meter_hourly(meter_csv, meter_key)
+    meter_max = meter["timestamp"].max()
+    print(f"  Meter rows: {len(meter):,}  max ts: {meter_max}")
+
+    merged = exp_hist.merge(meter, on="timestamp", how="inner")
+    merged_valid = merged.dropna(subset=["actual_kwh", "expected_kwh"]).copy()
+    print(f"  Trainable overlap hours: {len(merged_valid):,}")
+
+    forecast_anchor_source = ""
+    hourly_master_used = ""
+    last_meter_reading = ""
+    hourly_master_path = hourly_master_csv or _hourly_master_csv_path(key, out_dir)
+
+    if azure_live:
+        if live_raw is None:
+            raise RuntimeError("live_raw required for azure_live mode")
+        if forecast_start_arg:
+            fs_in = pd.to_datetime(forecast_start_arg)
+            forecast_anchor_source = "cli"
+            align_auto = False
+            print(f"  Forecast start (--forecast-start): {fs_in}")
+        else:
+            fs_in, last_ts, forecast_anchor_source, hourly_master_used = (
+                _resolve_per_meter_forecast_start(
+                    meter_df=meter,
+                    hourly_master_path=hourly_master_path,
+                    meter_key=meter_key,
+                    building_key=key,
+                )
+            )
+            last_meter_reading = last_ts.isoformat()
+            align_auto = False
+            print(
+                f"  Last meter reading: {last_ts} (day {last_ts.normalize().date()})"
+            )
+            print(
+                f"  Forecast anchor ({forecast_anchor_source}): "
+                f"7×24 h from {fs_in} (midnight after last reading day)"
+            )
+        live_7d, fs, fe = _slice_live_forecast_hours(
+            live_raw, fs_in, align_auto=align_auto
+        )
+        mode = "azure_live"
+        print(f"  Forecast window: [{fs}, {fe})  mode={mode}")
+
+        train_df = merged_valid[merged_valid["timestamp"] < fs].copy()
+        if len(train_df) < 500:
+            raise ValueError(
+                f"Too few training hours before forecast start ({len(train_df)}). "
+                "Use an earlier --forecast-start or ensure meter/history overlap."
+            )
+
+        forecast_exp = pv_mod.build_expected(
+            live_7d,
+            system_dc_w=bldg["system_dc_w"],
+            inverter_ac_w=bldg["inverter_ac_w"],
+            surface_tilt_deg=bldg["surface_tilt_deg"],
+            surface_azimuth_deg=bldg["surface_azimuth_deg"],
+        )
+        forecast_base = _attach_weather_extras(forecast_exp, live_7d)
+        weather_meta = f"azure:{azure_container}"
+    else:
+        if backtest:
+            fs = _backtest_forecast_start(hist_weather)
+            fe = fs + pd.Timedelta(hours=FORECAST_HOURS)
+            mode = "backtest"
+            forecast_anchor_source = "weather_tail"
+            _validate_backtest_weather(hist_weather, fs, fe)
+            print(
+                "  Forecast mode: backtest (Solcast CSV tail — not per-meter; "
+                "omit --backtest for production)"
+            )
+        elif forecast_start_arg:
+            fs = pd.to_datetime(forecast_start_arg)
+            fe = fs + pd.Timedelta(hours=FORECAST_HOURS)
+            mode = "explicit"
+            forecast_anchor_source = "cli"
+            print(f"  Forecast start (--forecast-start): {fs}")
+        else:
+            fs, last_ts, forecast_anchor_source, hourly_master_used = (
+                _resolve_per_meter_forecast_start(
+                    meter_df=meter,
+                    hourly_master_path=hourly_master_path,
+                    meter_key=meter_key,
+                    building_key=key,
+                )
+            )
+            fe = fs + pd.Timedelta(hours=FORECAST_HOURS)
+            mode = "forward"
+            last_meter_reading = last_ts.isoformat()
+            print(
+                f"  Last meter reading: {last_ts} (day {last_ts.normalize().date()})"
+            )
+            print(
+                f"  Forecast anchor ({forecast_anchor_source}): "
+                f"7×24 h from {fs} (midnight after last reading day)"
+            )
+
+        print(f"  Forecast mode: {mode}  window: [{fs}, {fe})")
+
+        train_df = merged_valid[merged_valid["timestamp"] < fs].copy()
+        if len(train_df) < 500:
+            raise ValueError(
+                f"Too few training hours before forecast start ({len(train_df)}). "
+                "Check meter/weather overlap or use --backtest with longer history."
+            )
+
+        local_weather, fs, fe = _slice_historical_forecast_hours(
+            hist_weather,
+            fs,
+            allow_gaps=(mode != "backtest"),
+        )
+        forecast_exp = pv_mod.build_expected(
+            local_weather,
+            system_dc_w=bldg["system_dc_w"],
+            inverter_ac_w=bldg["inverter_ac_w"],
+            surface_tilt_deg=bldg["surface_tilt_deg"],
+            surface_azimuth_deg=bldg["surface_azimuth_deg"],
+        )
+        forecast_base = _attach_weather_extras(forecast_exp, local_weather)
+        if len(forecast_base) != FORECAST_HOURS:
+            raise ValueError(
+                f"Expected {FORECAST_HOURS} forecast hours, got {len(forecast_base)}."
+            )
+        weather_meta = os.path.abspath(historical_weather_csv)
+
+    print(f"  Training XGBoost ({len(train_df):,} hours) …")
+    model, mae_va = _train_xgboost(train_df)
     print(f"  Holdout MAE (kWh/h): {mae_va:.4f}")
 
     X_fcast, _ = _feature_matrix(forecast_base)
@@ -660,33 +711,42 @@ def main() -> None:
 
     out_pv = forecast_base[["timestamp"]].copy()
     out_pv["expected_kwh_pvlib"] = forecast_base["expected_kwh"].values
-    out_pv["building_key"] = args.building_key
+    out_pv["building_key"] = key
     out_pv["forecast_mode"] = mode
 
     out_xgb = forecast_base[["timestamp"]].copy()
     out_xgb["predicted_kwh_xgboost"] = y_xgb
-    out_xgb["building_key"] = args.building_key
+    out_xgb["building_key"] = key
     out_xgb["forecast_mode"] = mode
 
     out_combo = forecast_base[["timestamp"]].copy()
     out_combo["expected_kwh_pvlib"] = forecast_base["expected_kwh"].values
     out_combo["predicted_kwh_xgboost"] = y_xgb
-    out_combo["building_key"] = args.building_key
+    out_combo["building_key"] = key
     out_combo["forecast_mode"] = mode
 
-    key = args.building_key.strip().lower().replace(" ", "_")
-    p_pv = os.path.join(args.out_dir, f"forecast_7d_pvlib_{key}.csv")
-    p_xgb = os.path.join(args.out_dir, f"forecast_7d_xgboost_{key}.csv")
-    p_combo = os.path.join(args.out_dir, f"forecast_7d_combined_{key}.csv")
-    p_meta = os.path.join(args.out_dir, f"forecast_7d_run_meta_{key}.csv")
+    p_pv = os.path.join(out_dir, f"forecast_7d_pvlib_{key}.csv")
+    p_xgb = os.path.join(out_dir, f"forecast_7d_xgboost_{key}.csv")
+    p_combo = os.path.join(out_dir, f"forecast_7d_combined_{key}.csv")
+    p_meta = os.path.join(out_dir, f"forecast_7d_run_meta_{key}.csv")
 
     out_pv.to_csv(p_pv, index=False)
     out_xgb.to_csv(p_xgb, index=False)
     out_combo.to_csv(p_combo, index=False)
 
+    if key == "library":
+        legacy_combo = os.path.join(out_dir, "forecast_7d_combined_library.csv")
+        out_combo.to_csv(legacy_combo, index=False)
+        print(f"  Wrote {legacy_combo} (dashboard legacy name)")
+
+    print(f"  Wrote {p_pv}")
+    print(f"  Wrote {p_xgb}")
+    print(f"  Wrote {p_combo}")
+
     meta_row = {
-        "building_key": args.building_key,
+        "building_key": key,
         "meter_key_full": meter_key,
+        "building_name": bldg["building_name"],
         "campus": campus,
         "forecast_mode": mode,
         "forecast_start": fs.isoformat(),
@@ -694,29 +754,186 @@ def main() -> None:
         "forecast_hours": FORECAST_HOURS,
         "train_hours_used": len(train_df),
         "val_mae_kwh_per_h": mae_va,
-        "historical_weather_csv": os.path.abspath(args.historical_weather_csv),
+        "historical_weather_csv": os.path.abspath(historical_weather_csv),
         "forecast_weather_source": weather_meta,
-        "meter_csv": os.path.abspath(args.meter_csv),
+        "meter_csv": os.path.abspath(meter_csv),
         "out_pvlib_csv": os.path.abspath(p_pv),
         "out_xgboost_csv": os.path.abspath(p_xgb),
         "out_combined_csv": os.path.abspath(p_combo),
     }
-    if args.azure_live:
+    if forecast_anchor_source:
         meta_row["forecast_anchor_source"] = forecast_anchor_source
+    if last_meter_reading:
+        meta_row["last_meter_reading"] = last_meter_reading
+    if hourly_master_used:
         meta_row["hourly_master_csv"] = hourly_master_used
-    meta = pd.DataFrame([meta_row])
-    meta.to_csv(p_meta, index=False)
+    pd.DataFrame([meta_row]).to_csv(p_meta, index=False)
+    print(f"  Wrote {p_meta}")
 
-    if args.save_model:
-        mpath = os.path.join(args.out_dir, f"xgb_forecast_model_{key}.json")
+    if save_model:
+        mpath = os.path.join(out_dir, f"xgb_forecast_model_{key}.json")
         model.get_booster().save_model(mpath)
-        print(f"Saved model: {mpath}")
+        print(f"  Saved model: {mpath}")
 
-    print("Wrote:")
-    print(f"  {p_pv}")
-    print(f"  {p_xgb}")
-    print(f"  {p_combo}")
-    print(f"  {p_meta}")
+    return meta_row
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description="7d PVLib + XGBoost forecast for meters in config._BUILDING_PVLIB_GEOMETRY"
+    )
+    ap.add_argument(
+        "--building-key",
+        default=None,
+        help="Process one meter only (default: all keys from config.analysis_meter_keys()).",
+    )
+    ap.add_argument(
+        "--historical-weather-csv",
+        default=config.SOLCAST_CLEANED_V2,
+        help="Local Solcast CSV for training (PVLib + meter overlap)",
+    )
+    ap.add_argument("--meter-csv", default=config.METER_READINGS)
+    ap.add_argument("--out-dir", default=config.DATA_FOR_VIZ_DIR)
+    ap.add_argument(
+        "--forecast-start",
+        default=None,
+        help="Override: same 7d start for every meter (default: per-meter day after last reading).",
+    )
+    ap.add_argument(
+        "--hourly-master-csv",
+        default=None,
+        help="Override hourly master path (single --building-key run only).",
+    )
+    ap.add_argument(
+        "--backtest",
+        action="store_true",
+        help="[local] Evaluate on last 168h of Solcast CSV (NOT per-meter; do not use for ops)",
+    )
+    ap.add_argument(
+        "--azure-live",
+        action="store_true",
+        help="Forecast using live Solcast blobs from Azure",
+    )
+    ap.add_argument(
+        "--campus",
+        default=None,
+        help="Solcast campus for live blobs (default: per building from panel_data)",
+    )
+    ap.add_argument(
+        "--azure-account-url",
+        default=os.environ.get("AZURE_STORAGE_ACCOUNT_URL", DEFAULT_AZURE_ACCOUNT_URL),
+    )
+    ap.add_argument(
+        "--azure-container",
+        default=os.environ.get("AZURE_STORAGE_CONTAINER", DEFAULT_AZURE_CONTAINER),
+    )
+    ap.add_argument(
+        "--live-min-timestamp",
+        default=None,
+        help="Optional: drop live rows with timestamp <= this",
+    )
+    ap.add_argument("--save-model", action="store_true")
+    args = ap.parse_args()
+
+    if args.azure_live:
+        if args.backtest:
+            ap.error("With --azure-live, do not use --backtest.")
+    elif args.backtest and args.forecast_start:
+        ap.error("Use only one of --backtest or --forecast-start.")
+
+    if args.building_key:
+        keys = [args.building_key.strip().lower()]
+    else:
+        keys = config.analysis_meter_keys()
+
+    if not keys:
+        print("ERROR: No meter keys in config._BUILDING_PVLIB_GEOMETRY", file=sys.stderr)
+        sys.exit(1)
+
+    if not os.path.isfile(args.historical_weather_csv):
+        print(f"ERROR: Weather file not found: {args.historical_weather_csv}", file=sys.stderr)
+        sys.exit(1)
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    print(f"Meters to forecast ({len(keys)}): {', '.join(keys)}")
+    if args.backtest:
+        print("Mode: backtest on shared Solcast CSV tail (not per-meter).")
+    elif args.forecast_start:
+        if len(keys) > 1:
+            print(
+                f"Mode: explicit start {args.forecast_start} for ALL meters "
+                "(omit --forecast-start for per-meter anchors)."
+            )
+    else:
+        print(
+            "Mode: per-meter — 7 days from midnight after each meter's last reading day "
+            "(meter CSV + hourly_<key>_master.csv)."
+        )
+
+    print("\nLoading historical weather (training) …")
+    hist_weather = _load_weather_local(args.historical_weather_csv)
+    print(
+        f"  historical rows: {len(hist_weather):,}  "
+        f"{hist_weather['timestamp'].min()} → {hist_weather['timestamp'].max()}"
+    )
+
+    pv_mod = _import_pvlib_builder()
+
+    live_raw: pd.DataFrame | None = None
+    if args.azure_live:
+        campus_live = (args.campus or "BUNDOORA").strip().upper()
+        sas = (os.environ.get("AZURE_STORAGE_SAS_TOKEN") or "").strip() or _DEFAULT_AZURE_SAS_FROM_NOTEBOOK
+        print(f"\nLoading live Solcast from Azure ({args.azure_container}) campus={campus_live} …")
+        live_raw = load_solcast_live_from_azure(
+            account_url=args.azure_account_url.rstrip("/"),
+            container_name=args.azure_container,
+            sas_token=sas,
+            campus=campus_live,
+            live_min_timestamp=args.live_min_timestamp,
+        )
+        print(
+            f"  live rows: {len(live_raw):,}  "
+            f"{live_raw['timestamp'].min()} → {live_raw['timestamp'].max()}"
+        )
+
+    meta_rows: list[dict] = []
+    errors: list[str] = []
+
+    for key in keys:
+        try:
+            meta = process_building_forecast(
+                key,
+                hist_weather=hist_weather,
+                pv_mod=pv_mod,
+                meter_csv=args.meter_csv,
+                out_dir=args.out_dir,
+                historical_weather_csv=args.historical_weather_csv,
+                azure_live=args.azure_live,
+                live_raw=live_raw,
+                campus_override=args.campus,
+                forecast_start_arg=args.forecast_start,
+                hourly_master_csv=args.hourly_master_csv if args.building_key else None,
+                backtest=args.backtest,
+                azure_container=args.azure_container,
+                save_model=args.save_model,
+            )
+            meta_rows.append(meta)
+        except Exception as e:
+            errors.append(f"{key}: {e}")
+            print(f"  ERROR [{key}]: {e}", file=sys.stderr)
+
+    if meta_rows:
+        meta_path = os.path.join(args.out_dir, "forecast_7d_runs_meta_all.csv")
+        pd.DataFrame(meta_rows).to_csv(meta_path, index=False)
+        print(f"\nWrote {meta_path} ({len(meta_rows)} site(s))")
+
+    if errors:
+        print("\nFailed meters:", file=sys.stderr)
+        for msg in errors:
+            print(f"  - {msg}", file=sys.stderr)
+        sys.exit(1 if not meta_rows else 2)
+
+    print("\nDone.")
 
 
 if __name__ == "__main__":

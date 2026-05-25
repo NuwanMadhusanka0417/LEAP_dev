@@ -98,7 +98,7 @@ function dualSummary(resultsGhi, resultsH) {
  * @param {HTMLElement} container
  * @param {Array} hourly
  */
-export function renderSeasonIrradiance(container, hourly) {
+export function renderSeasonIrradiance(container, hourly, site = {}) {
   if (!container) {
     console.error("[SeasonIrr] Missing panel container (#panel-seasonirr).");
     return;
@@ -140,9 +140,12 @@ export function renderSeasonIrradiance(container, hourly) {
     return `${s.label.split(" ")[0]}: ${nG}d GHI · ${nH}d H`;
   }).join(" · ");
 
+  const siteLine = site?.label
+    ? `<strong style="color:#e2e8f0">${site.label}</strong> · `
+    : "";
   container.innerHTML = `<div style="padding:16px">
     <p style="font-size:0.78rem;color:#64748b;margin:0 0 14px">
-      Same Australian seasons as tab 6. <strong style="color:#e2e8f0">Upper:</strong> summed hourly GHI on daylight hours (GHI &gt; 5 W/m²), kWh/m² per calendar day.
+      ${siteLine}Same Australian seasons as tab 6. <strong style="color:#e2e8f0">Upper:</strong> summed hourly GHI on daylight hours (GHI &gt; 5 W/m²), kWh/m² per calendar day.
       <strong style="color:#e2e8f0">Lower:</strong> health ratio H. ${counts}
     </p>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px 18px;align-items:start">

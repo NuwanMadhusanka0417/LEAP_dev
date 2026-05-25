@@ -65,12 +65,15 @@ def _poa(
     dni: pd.Series,
     dhi: pd.Series,
     albedo: pd.Series | None,
+    *,
+    surface_tilt_deg: float,
+    surface_azimuth_deg: float,
 ) -> pd.Series:
     alb = albedo.astype(float).clip(0.05, 0.4) if albedo is not None else pd.Series(0.2, index=idx)
     dni_extra = pvlib.irradiance.get_extra_radiation(idx.dayofyear)
     return irradiance.get_total_irradiance(
-        surface_tilt=config.SURFACE_TILT_DEG,
-        surface_azimuth=config.SURFACE_AZIMUTH_DEG,
+        surface_tilt=surface_tilt_deg,
+        surface_azimuth=surface_azimuth_deg,
         solar_zenith=zenith,
         solar_azimuth=azimuth,
         dni=dni,
@@ -86,11 +89,17 @@ def build_expected(
     df: pd.DataFrame,
     system_dc_w: float | None = None,
     inverter_ac_w: float | None = None,
+    surface_tilt_deg: float | None = None,
+    surface_azimuth_deg: float | None = None,
 ) -> pd.DataFrame:
     """One row per weather timestamp; index is tz-aware site time.
 
     If ``system_dc_w`` / ``inverter_ac_w`` are provided they override the
     config.py fallback values, allowing building-specific modelling.
+
+    ``surface_tilt_deg`` / ``surface_azimuth_deg`` override plane orientation
+    (PVLib convention: azimuth clockwise from north). Defaults come from
+    ``config.SURFACE_*`` when omitted.
     """
     missing = [c for c in REQUIRED if c not in df.columns]
     if missing:
@@ -98,6 +107,16 @@ def build_expected(
 
     dc_w = system_dc_w if system_dc_w is not None else config.SYSTEM_DC_W
     ac_w = inverter_ac_w if inverter_ac_w is not None else config.INVERTER_AC_W
+    tilt = (
+        surface_tilt_deg
+        if surface_tilt_deg is not None
+        else config.SURFACE_TILT_DEG
+    )
+    azimuth_plane = (
+        surface_azimuth_deg
+        if surface_azimuth_deg is not None
+        else config.SURFACE_AZIMUTH_DEG
+    )
 
     df = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="first")
     times = _localize_times(pd.DatetimeIndex(df["timestamp"]))
@@ -116,7 +135,17 @@ def build_expected(
     dhi = df["dhi"].astype(float)
     alb = df["albedo"] if "albedo" in df.columns else None
 
-    poa = _poa(times, zenith, sun_az, ghi, dni, dhi, alb)
+    poa = _poa(
+        times,
+        zenith,
+        sun_az,
+        ghi,
+        dni,
+        dhi,
+        alb,
+        surface_tilt_deg=tilt,
+        surface_azimuth_deg=azimuth_plane,
+    )
     air = df["air_temp"].astype(float)
     wind = df["wind_speed_10m"].astype(float) if "wind_speed_10m" in df.columns else pd.Series(2.0, index=times)
     wind = wind.fillna(2.0)
@@ -198,12 +227,24 @@ def run(
         print(f"  Inverter   : {bldg_cfg['inverter_type']}")
         print(f"  Optimisers : {bldg_cfg['optimisers']}")
         print(f"  Meter key  : {bldg_cfg['meter_key_full']}")
+        print(f"  PVLib tilt / azimuth° : {bldg_cfg['surface_tilt_deg']:.1f} / {bldg_cfg['surface_azimuth_deg']:.1f}")
         print("=" * 55)
 
     dc_w = bldg_cfg["system_dc_w"] if bldg_cfg else None
     ac_w = bldg_cfg["inverter_ac_w"] if bldg_cfg else None
+    if bldg_cfg:
+        tilt = bldg_cfg["surface_tilt_deg"]
+        az_plane = bldg_cfg["surface_azimuth_deg"]
+    else:
+        tilt, az_plane = config.surface_geometry_for_meter_key("library")
 
-    out = build_expected(raw, system_dc_w=dc_w, inverter_ac_w=ac_w)
+    out = build_expected(
+        raw,
+        system_dc_w=dc_w,
+        inverter_ac_w=ac_w,
+        surface_tilt_deg=tilt,
+        surface_azimuth_deg=az_plane,
+    )
 
     # ── merge actual meter readings when available ──
     if bldg_cfg:

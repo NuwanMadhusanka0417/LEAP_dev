@@ -1,13 +1,18 @@
 /**
- * Tabbed dashboard: loads PV_analysis/data_for_viz CSVs and renders Plotly charts.
+ * Tabbed dashboard: loads PV_analysis/data_for_viz CSVs per selected meter.
  */
 import {
   parseCSV,
   parseHour,
-  fetchDataVizFile,
-  purgeAllPlotlyInRoot,
   tryFetchPvlibFile,
+  purgeAllPlotlyInRoot,
 } from "./utils.js";
+import {
+  loadMeterCatalog,
+  fetchHourlyMasterText,
+  tryFetchForecastCombinedText,
+  hourlyMasterFilename,
+} from "./meters.js";
 import { renderDifference } from "./tab_difference.js";
 import { renderPowerBIDaily } from "./tab_powerbi_daily.js";
 import { renderLibraryPVLib } from "./tab_library_pvlib.js";
@@ -19,17 +24,21 @@ import { renderForecast } from "./tab_forecast.js";
 const PRECOMPUTED_PVLIB_HOURLY = "expected_power_pvlib_cleaned_v2.csv";
 
 let state = {
+  meters: [],
+  meterKey: "library",
+  meterLabel: "Library",
   hourly: [],
-  /** Rows from forecast_7d_combined_library.csv (PVLib vs XGBoost 7d window). */
   forecastCombined: [],
   dateFrom: "",
   dateTo: "",
-  /** yyyy-mm-dd from loaded hourly */
   dataMin: "",
   dataMax: "",
-  /** True when hourly rows have a second-model kWh (CSV column or merged precomputed file). */
   hasSecondModelBaseline: false,
 };
+
+function siteCtx() {
+  return { key: state.meterKey, label: state.meterLabel };
+}
 
 function isoFromDate(d) {
   return d.toISOString().slice(0, 10);
@@ -76,10 +85,6 @@ function normalizeHourly(rows) {
   return out.sort((a, b) => a.ts - b.ts);
 }
 
-/**
- * When hourly_library_master has no legacy/Real column (tab1 Real_model_prediction),
- * join precomputed PVLib hourly expected_kwh by timestamp so T = Actual÷Real and gap = Sim−Real can run.
- */
 function mergeLegacyFromPrecomputedHourly(hourly, pvlibRows) {
   const map = new Map();
   for (const r of pvlibRows) {
@@ -140,7 +145,6 @@ function setDateBoundsAndDefault() {
   toInput.min = mn;
   toInput.max = mx;
 
-  // Default: first ~month of data (same idea as library_power_chart.html initial window)
   let from = mn;
   let to = addMonths(mn, 1);
   if (to > mx) to = mx;
@@ -150,6 +154,94 @@ function setDateBoundsAndDefault() {
   state.dateTo = to;
   fromInput.value = from;
   toInput.value = to;
+}
+
+function updateLoadStatus(extra = "") {
+  const status = document.getElementById("load-status");
+  if (!status) return;
+  const site = state.meterLabel || state.meterKey;
+  if (!state.hourly.length) {
+    status.textContent = extra || `No data for ${site}`;
+    return;
+  }
+  status.textContent =
+    `${site} · ${state.hourly.length.toLocaleString()} hourly rows` +
+    (state.forecastCombined.length
+      ? ` · Forecast: ${state.forecastCombined.length} h`
+      : " · Forecast: not found") +
+    (state.hasSecondModelBaseline
+      ? " · Real baseline: yes"
+      : "") +
+    (extra ? ` · ${extra}` : "");
+}
+
+async function loadMeterData(meterKey) {
+  const key = meterKey.trim().toLowerCase();
+  const m = state.meters.find((x) => x.key === key);
+  state.meterKey = key;
+  state.meterLabel = m?.label ?? key;
+
+  const { text: hourlyText } = await fetchHourlyMasterText(key);
+  const { rows: hRows } = parseCSV(hourlyText);
+  state.hourly = normalizeHourly(hRows);
+
+  const pv = await tryFetchPvlibFile(PRECOMPUTED_PVLIB_HOURLY);
+  if (pv) {
+    const { rows: pRows } = parseCSV(pv.text);
+    const nFill = mergeLegacyFromPrecomputedHourly(state.hourly, pRows);
+    if (nFill > 0) {
+      console.info(
+        `[${key}] Filled Real baseline from ${PRECOMPUTED_PVLIB_HOURLY} for ${nFill.toLocaleString()} rows.`
+      );
+    }
+  }
+  refreshSecondModelFlag();
+
+  const fcRes = await tryFetchForecastCombinedText(key);
+  if (fcRes) {
+    const { rows: fcRows } = parseCSV(fcRes.text);
+    state.forecastCombined = normalizeForecastCombined(fcRows);
+  } else {
+    state.forecastCombined = [];
+  }
+
+  if (!state.hourly.length) {
+    throw new Error(`No rows in ${hourlyMasterFilename(key)}`);
+  }
+
+  setDateBoundsAndDefault();
+}
+
+function populateMeterSelect() {
+  const sel = document.getElementById("global-meter");
+  if (!sel) return;
+  sel.innerHTML = state.meters
+    .map(
+      (m) =>
+        `<option value="${m.key}" ${m.key === state.meterKey ? "selected" : ""}>${m.label}</option>`
+    )
+    .join("");
+}
+
+async function onMeterChange() {
+  const sel = document.getElementById("global-meter");
+  const key = sel?.value || state.meterKey;
+  const status = document.getElementById("load-status");
+  try {
+    status.textContent = `Loading ${key}…`;
+    await loadMeterData(key);
+    updateLoadStatus();
+    showTab(activeTab);
+  } catch (e) {
+    state.hourly = [];
+    state.forecastCombined = [];
+    updateLoadStatus(e.message);
+    console.error(e);
+    const panel = document.getElementById(`panel-${activeTab}`);
+    if (panel) {
+      panel.innerHTML = `<p style="color:#f87171;padding:2rem">Failed to load ${hourlyMasterFilename(key)}: ${e.message}</p>`;
+    }
+  }
 }
 
 function applyGlobalPreset(preset) {
@@ -195,34 +287,61 @@ function showTab(id) {
   const mainEl = document.querySelector("main");
   if (mainEl) purgeAllPlotlyInRoot(mainEl);
 
+  if (!state.hourly.length) {
+    const panel = document.getElementById(`panel-${id}`);
+    if (panel) {
+      panel.innerHTML = `<p style="color:#94a3b8;padding:2rem">Select a meter and ensure <code>${hourlyMasterFilename(state.meterKey)}</code> exists (run script 2).</p>`;
+    }
+    return;
+  }
+
   state.dateFrom = document.getElementById("global-date-from").value;
   state.dateTo = document.getElementById("global-date-to").value;
 
   const df = state.dateFrom;
   const dt = state.dateTo;
+  const ctx = siteCtx();
   const rangeCtx = {
     dateFrom: df,
     dateTo: dt,
     dataMin: state.dataMin,
     dataMax: state.dataMax,
+    site: ctx,
   };
 
   if (id === "powerbi") {
-    renderPowerBIDaily(document.getElementById("panel-powerbi"), state.hourly, df, dt);
+    renderPowerBIDaily(
+      document.getElementById("panel-powerbi"),
+      state.hourly,
+      df,
+      dt,
+      ctx,
+    );
   } else if (id === "difference") {
-    renderDifference(document.getElementById("panel-difference"), state.hourly, df, dt);
+    renderDifference(
+      document.getElementById("panel-difference"),
+      state.hourly,
+      df,
+      dt,
+      ctx,
+    );
   } else if (id === "library") {
     renderLibraryPVLib(
       document.getElementById("panel-library"),
       state.hourly,
-      rangeCtx
+      rangeCtx,
     );
   } else if (id === "seasonperf") {
-    renderSeasonPerf(document.getElementById("panel-seasonperf"), state.hourly);
+    renderSeasonPerf(
+      document.getElementById("panel-seasonperf"),
+      state.hourly,
+      ctx,
+    );
   } else if (id === "seasonirr") {
     renderSeasonIrradiance(
       document.getElementById("panel-seasonirr"),
       state.hourly,
+      ctx,
     );
   } else if (id === "degradation") {
     renderMeterDegradation(
@@ -230,11 +349,13 @@ function showTab(id) {
       state.hourly,
       df,
       dt,
+      ctx,
     );
   } else if (id === "forecast") {
     renderForecast(
       document.getElementById("panel-forecast"),
-      state.forecastCombined
+      state.forecastCombined,
+      ctx,
     );
   }
 }
@@ -242,49 +363,22 @@ function showTab(id) {
 async function init() {
   const status = document.getElementById("load-status");
   try {
-    status.textContent = "Loading CSVs…";
-    const { text: hourlyText } = await fetchDataVizFile("hourly_library_master.csv");
-    const { rows: hRows } = parseCSV(hourlyText);
-    state.hourly = normalizeHourly(hRows);
-
-    const pv = await tryFetchPvlibFile(PRECOMPUTED_PVLIB_HOURLY);
-    if (pv) {
-      const { rows: pRows } = parseCSV(pv.text);
-      const nFill = mergeLegacyFromPrecomputedHourly(state.hourly, pRows);
-      if (nFill > 0) {
-        console.info(
-          `[Difference tab] Filled Real baseline from ${PRECOMPUTED_PVLIB_HOURLY} for ${nFill.toLocaleString()} hourly rows (${pv.url}).`
-        );
-      }
+    status.textContent = "Loading meter list…";
+    state.meters = await loadMeterCatalog();
+    if (!state.meters.length) {
+      throw new Error("No meters in catalog");
     }
-    refreshSecondModelFlag();
+    state.meterKey = state.meters[0].key;
+    populateMeterSelect();
 
-    try {
-      const { text: fcText } = await fetchDataVizFile(
-        "forecast_7d_combined_library.csv"
-      );
-      const { rows: fcRows } = parseCSV(fcText);
-      state.forecastCombined = normalizeForecastCombined(fcRows);
-    } catch {
-      state.forecastCombined = [];
-    }
-
-    if (!state.hourly.length) throw new Error("No rows in hourly_library_master.csv");
-
-    setDateBoundsAndDefault();
-    status.textContent = `Loaded ${state.hourly.length.toLocaleString()} hourly rows${
-      state.forecastCombined.length
-        ? ` · Forecast: ${state.forecastCombined.length} h`
-        : " · Forecast CSV: not found"
-    }${
-      state.hasSecondModelBaseline
-        ? " · Real baseline: CSV column and/or precomputed PVLib"
-        : " · Real baseline: missing (T/gap need legacy_expected_kwh or data_pvlib CSV)"
-    }`;
+    await loadMeterData(state.meterKey);
+    updateLoadStatus();
 
     document.querySelectorAll(".tabs button").forEach((btn) => {
       btn.addEventListener("click", () => showTab(btn.dataset.tab));
     });
+
+    document.getElementById("global-meter")?.addEventListener("change", onMeterChange);
 
     document.getElementById("global-apply").addEventListener("click", () => {
       state.dateFrom = document.getElementById("global-date-from").value;

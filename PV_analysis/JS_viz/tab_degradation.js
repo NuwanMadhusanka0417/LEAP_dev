@@ -16,6 +16,7 @@ import {
   measureChartBox,
   PLOTLY_STATIC,
 } from "./utils.js";
+import { siteHeading } from "./meters.js";
 
 const MIN_POINTS_MONTHLY = 4;
 /** Minimum calendar years for an OLS line (interpret cautiously if only 2). */
@@ -200,7 +201,7 @@ function buildYearlyHChartLayout(theme, title, sz, annotations) {
   };
 }
 
-export function renderMeterDegradation(container, hourly, dateFrom, dateTo) {
+export function renderMeterDegradation(container, hourly, dateFrom, dateTo, site = {}) {
   purgePlotlyInContainer(container);
 
   if (!hourly || !hourly.length) {
@@ -261,7 +262,7 @@ export function renderMeterDegradation(container, hourly, dateFrom, dateTo) {
       : "—";
 
   container.innerHTML = `
-    <h2>Meter degradation (performance vs PVLib)</h2>
+    <h2>${siteHeading("Meter degradation (performance vs PVLib)", site)}</h2>
     <p class="note">
       <strong>Annual aggregation</strong> smooths most weather and seasonal swing.
       <strong>Linear regression on annual H</strong> summarises long-run trend;
@@ -322,7 +323,7 @@ export function renderMeterDegradation(container, hourly, dateFrom, dateTo) {
 
   if (!monthDays.length && !yearLabels.length) {
     container.innerHTML = `
-      <h2>Meter degradation</h2>
+      <h2>${siteHeading("Meter degradation", site)}</h2>
       <p style="color:#94a3b8;padding:2rem">No daylight rows with PVLib expected in this date range.</p>`;
     return;
   }

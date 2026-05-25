@@ -1,6 +1,6 @@
 # PV Analysis — Single Meter Pipeline
 
-Single-meter solar analysis for La Trobe Bundoora (Library).  
+Solar analysis for La Trobe Bundoora (Library, DMW, DW, …).  
 All commands are run from the **`PV_analysis/`** directory.
 
 ---
@@ -42,30 +42,45 @@ python 1_data_cleaning.py
 ```bash
 python 2_build_library_analysis_outputs.py
 ```
-**Reads:** `data_cleaned/` meter + weather CSVs, `panel_data.csv`  
-**Writes** (to `data_for_viz/`):
-- `hourly_library_master.csv` — merged hourly: actual kWh, PVLib expected kWh, GHI
-- `daily_library_metrics.csv` — daily aggregates and difference metrics
-- `library_kpis_summary.csv` — single-row KPI summary (PR, correlation, system size)
+Processes **every meter key** in `config._BUILDING_PVLIB_GEOMETRY` (default: `library`, `dmw`, `dw`).  
+Edit that dict in `config.py` to add/remove sites or change PVLib tilt/azimuth.
 
-> **Tip:** add `--compute-pvlib` to re-run PVLib on-the-fly instead of using a cached file.
+**Reads:** `data_cleaned/` meter + weather CSVs, `panel_data.csv`  
+**Writes** (to `data_for_viz/`), per key `<key>`:
+- `hourly_<key>_master.csv` — merged hourly actual + PVLib expected (+ GHI from weather merge)
+- `daily_<key>_metrics.csv` — daily aggregates
+- `sites_kpis_summary.csv` — one row per site
+
+Legacy names kept for **library**: `hourly_library_master.csv`, `daily_library_metrics.csv`, `library_kpis_summary.csv`.
+
+Optional: `--building-key dmw` (one site only); `--compute-pvlib` (ignore precomputed PVLib CSVs).
 
 ---
 
 ### Step 3 — 7-day forecast *(optional)*
-```bash
-# Live Azure Solcast weather:
-python 4_forecast_7d_pvlib_xgboost.py --building-key library --azure-live --campus BUNDOORA
+Run **after Step 2** (needs `hourly_<key>_master.csv` for Azure anchor times).
 
-# Local historical data only (backtest / offline):
-python 4_forecast_7d_pvlib_xgboost.py --building-key library --backtest
+Processes all keys in `config._BUILDING_PVLIB_GEOMETRY` (default: `library`, `dmw`, `dw`).
+
+```bash
+# Live Azure Solcast weather (all configured meters):
+python 4_forecast_7d_pvlib_xgboost.py --azure-live --campus BUNDOORA
+
+# Local (default): 7 days per meter from midnight after that meter's last reading day:
+python 4_forecast_7d_pvlib_xgboost.py
+
+# Evaluation only — last 168h of shared Solcast file (NOT per-meter):
+python 4_forecast_7d_pvlib_xgboost.py --backtest
 ```
-**Reads:** `data_cleaned/` meter + weather CSVs, `panel_data.csv`  
-**Writes** (to `data_for_viz/`):
-- `forecast_7d_pvlib_library.csv` — PVLib physics forecast
-- `forecast_7d_xgboost_library.csv` — XGBoost ML forecast
-- `forecast_7d_combined_library.csv` — merged PVLib vs XGBoost (used by dashboard)
-- `forecast_7d_run_meta_library.csv` — run metadata
+
+Optional: `--building-key dmw` (one site only).
+
+**Reads:** `data_cleaned/` meter + weather, `panel_data.csv`, `hourly_<key>_master.csv` (Step 2)  
+**Writes** (to `data_for_viz/`), per key `<key>`:
+- `forecast_7d_pvlib_<key>.csv`, `forecast_7d_xgboost_<key>.csv`, `forecast_7d_combined_<key>.csv`, `forecast_7d_run_meta_<key>.csv`
+- `forecast_7d_runs_meta_all.csv` — combined run summary
+
+Legacy for **library**: `forecast_7d_combined_library.csv` (dashboard).
 
 ---
 
@@ -78,6 +93,8 @@ python serve_js_dashboard.py
 ```
 
 Then open **[http://127.0.0.1:8080/JS_viz/](http://127.0.0.1:8080/JS_viz/)** in your browser.
+
+Use the **Meter** dropdown in the header to switch between **library**, **dmw**, and **dw** (from `sites_kpis_summary.csv` or the same keys as `config._BUILDING_PVLIB_GEOMETRY`).
 
 ### Dashboard tabs
 

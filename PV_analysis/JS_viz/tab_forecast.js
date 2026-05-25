@@ -9,6 +9,7 @@ import {
   measureChartBox,
   PLOTLY_STATIC,
 } from "./utils.js";
+import { forecastCombinedFilename, siteHeading } from "./meters.js";
 
 function rollingMedianTrailing(values, windowSize) {
   const w = Math.max(1, windowSize);
@@ -57,16 +58,20 @@ function formatSignedPct(n) {
  * @param {HTMLElement} container
  * @param {Array<{ts: Date, tsStr: string, day: string, expected: number, predicted: number, gap: number}>} rows
  */
-export function renderForecast(container, rows) {
+export function renderForecast(container, rows, site = {}) {
   purgePlotlyInContainer(container);
+
+  const key = site?.key || "library";
+  const fcFile = forecastCombinedFilename(key);
 
   if (!rows || !rows.length) {
     container.innerHTML = `
-      <h2>7-day forecast (PVLib vs XGBoost)</h2>
+      <h2>${siteHeading("7-day forecast (PVLib vs XGBoost)", site)}</h2>
       <p class="note">
         No data. Generate
-        <code>PV_analysis/data_for_viz/forecast_7d_combined_library.csv</code> with
-        <code>python 4_forecast_7d_pvlib_xgboost.py --building-key library --azure-live …</code>
+        <code>PV_analysis/data_for_viz/${fcFile}</code> with
+        <code>python 4_forecast_7d_pvlib_xgboost.py</code> (all meters in config) or
+        <code>--building-key ${key}</code>.
       </p>
     `;
     return;
@@ -110,7 +115,7 @@ export function renderForecast(container, rows) {
   const idGap = nextPlotDomId("plot-fc-gap");
 
   container.innerHTML = `
-    <h2>Next 7 days — forecast (PVLib vs XGBoost)</h2>
+    <h2>${siteHeading("Next 7 days — forecast (PVLib vs XGBoost)", site)}</h2>
     <p class="note forecast-summary">
       Forecast window: <strong>${t0}</strong> → <strong>${t1}</strong>
       · Real (XGBoost): <strong>${sumPred.toFixed(1)}</strong> kWh

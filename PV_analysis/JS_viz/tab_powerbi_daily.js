@@ -9,6 +9,7 @@ import {
   measureChartBox,
   PLOTLY_STATIC,
 } from "./utils.js";
+import { siteHeading } from "./meters.js";
 
 function dailyAllHours(hourlyFiltered) {
   const byDay = new Map();
@@ -33,7 +34,7 @@ function dailyAllHours(hourlyFiltered) {
   };
 }
 
-export function renderPowerBIDaily(container, hourly, dateFrom, dateTo) {
+export function renderPowerBIDaily(container, hourly, dateFrom, dateTo, site = {}) {
   const filtered = hourly.filter(
     (r) => r.day >= dateFrom && r.day <= dateTo
   );
@@ -49,7 +50,7 @@ export function renderPowerBIDaily(container, hourly, dateFrom, dateTo) {
   const idGhi = nextPlotDomId("plot-pbi-ghi");
   const idGen = nextPlotDomId("plot-pbi-gen");
   container.innerHTML = `
-    <h2>Daily overview (PVLib)</h2>
+    <h2>${siteHeading("Daily overview (PVLib)", site)}</h2>
     <p class="note">Degradation % (vs PVLib expected): <strong>${
       Number.isFinite(degPct) ? degPct.toFixed(2) + "%" : "—"
     }</strong>

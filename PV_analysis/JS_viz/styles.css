@@ -37,13 +37,18 @@ body {
   font-size: 0.8rem;
   color: #94a3b8;
 }
-.controls input[type="date"] {
+.controls input[type="date"],
+.controls select.meter-select {
   background: #0f172a;
   border: 1px solid #475569;
   color: #e2e8f0;
   padding: 6px 10px;
   border-radius: 6px;
   font-size: 0.85rem;
+}
+.controls select.meter-select {
+  min-width: 11rem;
+  margin-left: 4px;
 }
 .controls .btn {
   border: none;
