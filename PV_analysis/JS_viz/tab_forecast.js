@@ -63,15 +63,13 @@ export function renderForecast(container, rows, site = {}) {
 
   const key = site?.key || "library";
   const fcFile = forecastCombinedFilename(key);
+  const staleHint = site?.staleHint || "";
 
   if (!rows || !rows.length) {
     container.innerHTML = `
       <h2>${siteHeading("7-day forecast (PVLib vs XGBoost)", site)}</h2>
-      <p class="note">
-        No data. Generate
-        <code>PV_analysis/data_for_viz/${fcFile}</code> with
-        <code>python 4_forecast_7d_pvlib_xgboost.py</code> (all meters in config) or
-        <code>--building-key ${key}</code>.
+      <p class="note" style="color:#fbbf24">
+        ${staleHint || `No forward forecast data. Generate <code>PV_analysis/data_for_viz/${fcFile}</code> with <code>python 4_forecast_7d_pvlib_xgboost.py --campus BUNDOORA</code> (or <code>python run_pipeline.py</code>), then hard-refresh this page (Ctrl+F5).`}
       </p>
     `;
     return;
@@ -94,6 +92,8 @@ export function renderForecast(container, rows, site = {}) {
 
   const t0 = rows[0].tsStr;
   const t1 = rows[rows.length - 1].tsStr;
+  const nDays = new Set(rows.map((r) => r.day)).size;
+  const xRange = [t0, t1];
 
   const dailyPct = dailyExp.map((exp, i) => {
     const pred = dailyPred[i];
@@ -117,7 +117,8 @@ export function renderForecast(container, rows, site = {}) {
   container.innerHTML = `
     <h2>${siteHeading("Next 7 days — forecast (PVLib vs XGBoost)", site)}</h2>
     <p class="note forecast-summary">
-      Forecast window: <strong>${t0}</strong> → <strong>${t1}</strong>
+      Forward forecast: <strong>${t0}</strong> → <strong>${t1}</strong>
+      (${rows.length} h, ${nDays} day(s))
       · Real (XGBoost): <strong>${sumPred.toFixed(1)}</strong> kWh
       · Simulated (PVLib): <strong>${sumExp.toFixed(1)}</strong> kWh
       · Δ (Sim − Real): <strong>${deltaTot.toFixed(1)}</strong> kWh
@@ -169,7 +170,12 @@ export function renderForecast(container, rows, site = {}) {
         margin,
         title: "Hourly generation (kWh)",
         yaxis: { ...theme.yaxis, title: "kWh / h" },
-        xaxis: { ...theme.xaxis, title: "Time" },
+        xaxis: {
+          ...theme.xaxis,
+          title: "Time",
+          type: "date",
+          range: xRange,
+        },
         legend: { orientation: "h", yanchor: "bottom", y: 1.02, x: 0 },
         hovermode: "x unified",
         autosize: false,
@@ -241,7 +247,12 @@ export function renderForecast(container, rows, site = {}) {
         margin,
         title: "Hourly gap (Simulated − Real)",
         yaxis: { ...theme.yaxis, title: "Gap (kWh)" },
-        xaxis: { ...theme.xaxis, title: "Time" },
+        xaxis: {
+          ...theme.xaxis,
+          title: "Time",
+          type: "date",
+          range: xRange,
+        },
         shapes: [
           {
             type: "line",

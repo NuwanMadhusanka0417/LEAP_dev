@@ -228,26 +228,80 @@ def default_solcast_csv_path(prefer_cleaned: bool = True) -> str:
     )
 
 
-def load_solcast_data(path=None, prefer_cleaned=True):
-    """Load Solcast CSV (prefer data_cleaned/ when file exists for robust zenith/GHI)."""
-    if path is None:
-        path = default_solcast_csv_path(prefer_cleaned=prefer_cleaned)
-    else:
+SOLCAST_META_COLS = ("campus", "accessed_on", "source_file", "timestamp_utc")
+
+
+def _normalize_solcast_timestamps(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "timestamp" not in out.columns and "period_end" in out.columns:
+        out["timestamp"] = out["period_end"]
+    out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce")
+    return out.dropna(subset=["timestamp"])
+
+
+def _align_solcast_weather_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop download metadata; coerce weather fields to float (cleaned + raw merge)."""
+    out = df.copy()
+    out = out.drop(columns=[c for c in SOLCAST_META_COLS if c in out.columns])
+    for col in out.columns:
+        if col == "timestamp":
+            continue
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    return out
+
+
+def load_solcast_data(path=None, prefer_cleaned=True, merge_raw_extension=False):
+    """
+    Load Solcast CSV. When merge_raw_extension is True and path is None, keep the
+    existing cleaned history and append newer rows from data_raw/ (Step 0 download).
+    """
+    if path is not None:
         path = resolve_input_path(path, DATA_RAW_DIR)
         if not os.path.isfile(path):
             raise FileNotFoundError(path)
-    df = pd.read_csv(path)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    df = df.dropna(subset=["timestamp"])
-    return df
+        return _normalize_solcast_timestamps(pd.read_csv(path))
+
+    if merge_raw_extension:
+        cleaned_path = os.path.join(DATA_CLEANED_DIR, CLEANED_SOLCAST_CSV)
+        raw_primary = os.path.join(DATA_RAW_DIR, SOLCAST_CSV)
+        parts: list[pd.DataFrame] = []
+        cutoff = None
+        if os.path.isfile(cleaned_path):
+            cleaned = _normalize_solcast_timestamps(pd.read_csv(cleaned_path))
+            parts.append(cleaned)
+            cutoff = cleaned["timestamp"].max()
+        if os.path.isfile(raw_primary):
+            raw = _normalize_solcast_timestamps(pd.read_csv(raw_primary))
+            if cutoff is not None:
+                extra = raw[raw["timestamp"] > cutoff]
+            else:
+                extra = raw
+            if len(extra):
+                print(
+                    f"  Solcast: appending {len(extra)} raw row(s) after "
+                    f"{cutoff if cutoff is not None else 'start'}"
+                )
+                parts.append(extra)
+        if parts:
+            df = pd.concat(parts, ignore_index=True)
+            dedupe_cols = ["timestamp", "campus"] if "campus" in df.columns else ["timestamp"]
+            df = (
+                df.sort_values(dedupe_cols)
+                .drop_duplicates(subset=dedupe_cols, keep="last")
+                .reset_index(drop=True)
+            )
+            return _align_solcast_weather_columns(df)
+
+    path = default_solcast_csv_path(prefer_cleaned=prefer_cleaned)
+    return _normalize_solcast_timestamps(pd.read_csv(path))
 
 
 def resample_solcast_to_hourly(solcast_df):
     """Resample Solcast (30-min) to hourly (mean) for alignment with meter."""
     if "ghi" not in solcast_df.columns:
         raise ValueError("Solcast must contain 'ghi' column")
-    sol = solcast_df.set_index("timestamp").sort_index()
-    hourly = sol.resample("1h").mean().reset_index()
+    sol = _align_solcast_weather_columns(solcast_df).set_index("timestamp").sort_index()
+    hourly = sol.resample("1h").mean(numeric_only=True).reset_index()
     hourly["timestamp"] = pd.to_datetime(hourly["timestamp"]).dt.floor("h")
     return hourly
 
@@ -979,7 +1033,9 @@ def run_cleaning_v2(
 
     print("Loading data...")
     meter_df = load_meter_data(meter_path)
-    solcast_df = load_solcast_data(solcast_path, prefer_cleaned=(solcast_path is None))
+    solcast_df = load_solcast_data(
+        solcast_path, merge_raw_extension=(solcast_path is None)
+    )
 
     print("Resampling Solcast to hourly...")
     solcast_hourly = resample_solcast_to_hourly(solcast_df)
@@ -1046,11 +1102,11 @@ def clean_solcast(solcast_df):
     Solcast is reference/weather data; we only resample to hourly and drop duplicates.
     Optionally drop rows with all-zero GHI/DNI/DHI if you want to keep only useful rows.
     """
-    df = solcast_df.copy()
+    df = _align_solcast_weather_columns(solcast_df.copy())
     df = df.dropna(subset=["timestamp"])
     # Resample to hourly for consistency with meter
     if "ghi" in df.columns:
-        df = df.set_index("timestamp").resample("1h").mean().reset_index()
+        df = df.set_index("timestamp").resample("1h").mean(numeric_only=True).reset_index()
     return df
 
 
@@ -1084,8 +1140,9 @@ def run_cleaning(
 
     print("Loading data...")
     meter_df = load_meter_data(meter_path)
-    # Prefer solcast_df_cleaned.csv for robust zenith/GHI when no path given
-    solcast_df = load_solcast_data(solcast_path, prefer_cleaned=(solcast_path is None))
+    solcast_df = load_solcast_data(
+        solcast_path, merge_raw_extension=(solcast_path is None)
+    )
 
     print("Resampling Solcast to hourly...")
     solcast_hourly = resample_solcast_to_hourly(solcast_df)

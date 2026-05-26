@@ -46,7 +46,12 @@ export async function fetchHourlyMasterText(meterKey) {
 
 export async function tryFetchForecastCombinedText(meterKey) {
   const key = meterKey.trim().toLowerCase();
-  return tryFetchDataVizFile(forecastCombinedFilename(key));
+  const name = forecastCombinedFilename(key);
+  try {
+    return await fetchDataVizFile(name, { cacheBust: true });
+  } catch {
+    return null;
+  }
 }
 
 /** Page heading with site name when provided. */

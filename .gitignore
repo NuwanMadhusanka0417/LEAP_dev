@@ -163,6 +163,7 @@
 /Results_seasonality/last/cluster_seasonal_degradation.png
 /Results_seasonality/last/cluster_seasonal_degradation_summary.csv
 *.pyc
+PV_analysis/.env
 /Maintenance/alerts_solar.bun_tlc\#realenergyintotheload\#kwh.csv
 /Maintenance/alerts_solar.bun_union\#realenergyintotheload\#kwh.csv
 /Maintenance/alerts_solar.bun_wlt\#realenergyintotheload\#kwh.csv

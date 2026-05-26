@@ -20,19 +20,99 @@ import pandas as pd
 
 # PV_analysis package root (this folder)
 BASE = os.path.dirname(os.path.abspath(__file__))
+ENV_FILE = os.path.join(BASE, ".env")
+ENV_EXAMPLE_FILE = os.path.join(BASE, ".env.example")
 DATA_DIR = os.path.join(BASE, "data_cleaned")
 DATA_FOR_VIZ_DIR = os.path.join(BASE, "data_for_viz")
+
+_PLACEHOLDER_VALUES = frozenset({
+    "",
+    "your-server",
+    "your-user",
+    "your-password",
+    "your-sas-token",
+})
+
+
+def _parse_dotenv_line(raw: str) -> tuple[str, str] | None:
+    line = raw.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        return None
+    key, _, val = line.partition("=")
+    key = key.strip()
+    val = val.strip()
+    if not key:
+        return None
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+        val = val[1:-1]
+    return key, val
+
+
+def load_dotenv_file(path: str | None = None, *, override: bool = False) -> bool:
+    """Load one KEY=VALUE file into os.environ. Returns True if the file exists."""
+    path = path or ENV_FILE
+    if not os.path.isfile(path):
+        return False
+
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            parsed = _parse_dotenv_line(raw)
+            if parsed is None:
+                continue
+            key, val = parsed
+            if not override and os.environ.get(key, "").strip():
+                continue
+            os.environ[key] = val
+    return True
+
+
+def ensure_env_file() -> str | None:
+    """If .env is missing, copy .env.example → .env. Returns path created or None."""
+    if os.path.isfile(ENV_FILE):
+        return None
+    if not os.path.isfile(ENV_EXAMPLE_FILE):
+        return None
+    import shutil
+
+    shutil.copy2(ENV_EXAMPLE_FILE, ENV_FILE)
+    return ENV_FILE
+
+
+def load_credentials(*, quiet: bool = False) -> list[str]:
+    """
+    Load PV_analysis/.env (create from .env.example if missing), then .env.example
+    for any keys still unset. Returns list of files loaded.
+    """
+    created = ensure_env_file()
+    if created and not quiet:
+        print(f"Created {created} from .env.example — edit it with your real credentials.")
+
+    loaded: list[str] = []
+    if load_dotenv_file(ENV_FILE):
+        loaded.append(ENV_FILE)
+    if load_dotenv_file(ENV_EXAMPLE_FILE):
+        loaded.append(ENV_EXAMPLE_FILE)
+    return loaded
+
+
+def env_value(key: str, *, allow_placeholder: bool = False) -> str:
+    val = os.environ.get(key, "").strip()
+    if allow_placeholder:
+        return val
+    if val in _PLACEHOLDER_VALUES:
+        return ""
+    return val
 
 # Weather: cleaned hourly Bundoora series (place file in data_cleaned/)
 SOLCAST_CLEANED_V2 = os.path.join(DATA_DIR, "solcast_df_cleaned_2020_2025.csv")
 SOLCAST_RAW_MULTI = os.path.join(DATA_DIR, "solcast_df.csv")
 
-# Meter readings (hourly, all buildings)
-# METER_READINGS = os.path.join(DATA_DIR, "SolarMeterReadings1hour_cleaned_v2_2021.csv")
-METER_READINGS = os.path.join(DATA_DIR, "SolarMeterReadings1hour_cleaned.csv")
-
-# Long-range hourly meter file (2020–2025) — library batch analysis
-# METER_READINGS_2020_2025 = os.path.join(DATA_DIR, "SolarMeterReadings1hour_cleaned_2020_2025.csv")
+# Meter readings (hourly) — prefer long-range cleaned file from 1_data_cleaning.py
+_METER_CLEANED_LONG = os.path.join(DATA_DIR, "SolarMeterReadings1hour_cleaned_2020_2025.csv")
+_METER_CLEANED_SHORT = os.path.join(DATA_DIR, "SolarMeterReadings1hour_cleaned.csv")
+METER_READINGS = (
+    _METER_CLEANED_LONG if os.path.isfile(_METER_CLEANED_LONG) else _METER_CLEANED_SHORT
+)
 
 # Outputs: library merged hourly + daily + KPI (build_library_analysis_outputs.py)
 LIBRARY_ANALYSIS_DIR = DATA_FOR_VIZ_DIR

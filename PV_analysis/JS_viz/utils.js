@@ -106,14 +106,17 @@ export function getCandidateDataBases() {
 }
 
 /** @returns {{ text: string, url: string }} */
-export async function fetchDataVizFile(relPath) {
+export async function fetchDataVizFile(relPath, { cacheBust = false } = {}) {
   const name = relPath.replace(/^\//, "");
   const bases = getCandidateDataBases();
   const tried = [];
   for (const base of bases) {
     const url = new URL(name, base);
+    if (cacheBust) {
+      url.searchParams.set("_", String(Date.now()));
+    }
     try {
-      const resp = await fetch(url.href);
+      const resp = await fetch(url.href, cacheBust ? { cache: "no-store" } : {});
       if (resp.ok) return { text: await resp.text(), url: url.href };
       tried.push(`${url.href} (${resp.status})`);
     } catch (e) {

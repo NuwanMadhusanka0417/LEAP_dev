@@ -1,6 +1,5 @@
 /**
- * Hourly actual vs PVLib expected (and optional legacy expected from master CSV).
- * Data comes from the selected meter's hourly_*_master.csv via app.js — not a shared JSON file.
+ * Hourly actual vs PVLib expected from hourly_*_master.csv (selected meter in header).
  */
 import {
   plotlyDarkTheme,
@@ -16,14 +15,12 @@ function updateStats(DATA, from, to) {
   const d0 = new Date(from);
   const d1 = new Date(to);
   let sumA = 0,
-    sumO = 0,
     sumP = 0,
     count = 0;
   for (let i = 0; i < DATA.timestamp.length; i++) {
     const t = new Date(DATA.timestamp[i].replace(" ", "T"));
     if (t >= d0 && t <= d1) {
       sumA += DATA.actual_kwh[i] || 0;
-      sumO += DATA.old_expected_kwh[i] || 0;
       sumP += DATA.pvlib_expected_kwh[i] || 0;
       count++;
     }
@@ -34,7 +31,6 @@ function updateStats(DATA, from, to) {
   };
   set("lib-stat-hours", count.toLocaleString());
   set("lib-stat-actual", (sumA / 1000).toFixed(1) + " MWh");
-  set("lib-stat-old", (sumO / 1000).toFixed(1) + " MWh");
   set("lib-stat-pvlib", (sumP / 1000).toFixed(1) + " MWh");
 }
 
@@ -61,16 +57,13 @@ export async function renderLibraryPVLib(container, hourly, rangeCtx = {}) {
   const DATA = {
     timestamp: hourly.map((r) => r.tsStr),
     actual_kwh: hourly.map((r) => r.actual),
-    old_expected_kwh: hourly.map((r) =>
-      Number.isFinite(r.legacy) ? r.legacy : null
-    ),
     pvlib_expected_kwh: hourly.map((r) => r.expected),
   };
 
   const plotLibId = nextPlotDomId("plot-library-main");
   container.innerHTML = `
     <h2>${siteHeading("Actual vs expected (PVLib chart)", rangeCtx.site)}</h2>
-    <p class="note">Uses <code>hourly_*_master.csv</code> for the meter selected in the header. A third “old expected” series appears only if that column exists in the master file.</p>
+    <p class="note">Uses <code>hourly_*_master.csv</code> for the meter selected in the header (actual vs PVLib expected).</p>
     <div class="controls" style="margin-bottom:12px;">
       <label>From <input type="date" id="lib-date-from" /></label>
       <label>To <input type="date" id="lib-date-to" /></label>
@@ -82,11 +75,9 @@ export async function renderLibraryPVLib(container, hourly, rangeCtx = {}) {
     </div>
     <div class="stats-bar" style="display:flex;flex-wrap:wrap;gap:20px;font-size:0.82rem;margin-bottom:10px;background:#1e293b;padding:10px 14px;border-radius:8px;border:1px solid #334155;">
       <span><span style="color:#22c55e">●</span> Actual</span>
-      <span><span style="color:#f97316">●</span> Old Expected</span>
       <span><span style="color:#3b82f6">●</span> PVLib Expected</span>
       <span>Hours: <strong id="lib-stat-hours">—</strong></span>
       <span>Σ Actual: <strong id="lib-stat-actual">—</strong></span>
-      <span>Σ Old: <strong id="lib-stat-old">—</strong></span>
       <span>Σ PVLib: <strong id="lib-stat-pvlib">—</strong></span>
     </div>
     <div id="${plotLibId}" class="chart-box chart-box--tall"></div>
@@ -104,21 +95,6 @@ export async function renderLibraryPVLib(container, hourly, rangeCtx = {}) {
         "<b>Actual</b>: %{y:.1f} kWh<br>%{x}<extra></extra>",
     },
   ];
-  const hasOld = DATA.old_expected_kwh.some(
-    (v) => v !== null && v !== undefined && Number.isFinite(Number(v))
-  );
-  if (hasOld) {
-    traces.push({
-      x: DATA.timestamp,
-      y: DATA.old_expected_kwh,
-      name: "Old Expected (kWh)",
-      type: "scatter",
-      mode: "lines",
-      line: { color: "#f97316", width: 1.5, dash: "dot" },
-      hovertemplate:
-        "<b>Old Expected</b>: %{y:.1f} kWh<br>%{x}<extra></extra>",
-    });
-  }
   traces.push({
     x: DATA.timestamp,
     y: DATA.pvlib_expected_kwh,
@@ -147,10 +123,10 @@ export async function renderLibraryPVLib(container, hourly, rangeCtx = {}) {
     fromEl.value = rangeCtx.dateFrom;
     toEl.value = rangeCtx.dateTo;
   } else {
-    const defaultTo =
-      addDays(t0, 7) > tEnd ? tEnd : addDays(t0, 7);
-    fromEl.value = t0;
-    toEl.value = defaultTo;
+    let from = addMonths(dataMax, -3);
+    if (from < dataMin) from = dataMin;
+    fromEl.value = from;
+    toEl.value = dataMax;
   }
 
   const tLib = plotlyDarkTheme();

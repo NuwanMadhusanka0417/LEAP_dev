@@ -24,7 +24,43 @@ Place these files in `PV_analysis/data_raw/` before running:
 
 ---
 
+## Real-time refresh (manual)
+
+Set credentials once — copy `PV_analysis/.env.example` to `PV_analysis/.env` and fill in values (loaded automatically; do not commit `.env`):
+
+- `LEAP_DB_SERVER`, `LEAP_DB_USER`, `LEAP_DB_PASSWORD` — SQL meter readings  
+- `AZURE_STORAGE_SAS_TOKEN` — live Solcast blobs (same container as `forecasting.ipynb`)
+
+From **`PV_analysis/`**:
+
+```bash
+# Full refresh (download → clean → build → forecast):
+python run_pipeline.py
+
+python serve_js_dashboard.py
+```
+
+Optional flags: `--skip-download`, `--skip-forecast`, `--download-only`, `--azure-live`, `--no-compute-pvlib`.
+
+Step 4 uses a **flexible forecast span** (target ~7 days, max 10 days, or fewer if that is all the weather provides).
+
+Open http://127.0.0.1:8080/JS_viz/ and refresh the browser after each pipeline run.
+
+`0_download_data.py` appends incrementally:
+
+- **Weather:** Azure `live` + `forecast` CSV blobs; keeps rows with `timestamp` after the last date per `campus` in `data_raw/solcast_df_2020_2025.csv`
+- **Meters:** SQL `[dbo].[SolarMeterReadings]`; same diff/30min/hourly logic as `forecasting.ipynb`; output columns `timestamp`, `meter`, `meter_reading`
+
+Default meters: `library`, `dmw`, `dw` from `config.py`. Use `--all-realenergy-meters` for every site.
+
+---
+
 ## Running order
+
+### Step 0 — Download / merge raw data *(optional if CSVs already up to date)*
+```bash
+python 0_download_data.py
+```
 
 ### Step 1 — Clean meter + weather data
 ```bash

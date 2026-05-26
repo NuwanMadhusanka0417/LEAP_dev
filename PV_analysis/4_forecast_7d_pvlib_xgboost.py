@@ -7,9 +7,10 @@ Processes every meter key in ``config._BUILDING_PVLIB_GEOMETRY`` (via
 
 **Training:** historical cleaned Solcast (local CSV) + hourly meter readings where timestamps overlap.
 
-**Forecast window (default):** 168 hours starting at **00:00 on the calendar day after** the
-last meter reading for **that** meter (from cleaned meter CSV and ``hourly_{key}_master.csv``).
-Not anchored to the Solcast CSV end. Use ``--backtest`` only for evaluation on the weather tail.
+**Forecast window (default):** from **00:00 on the calendar day after** the last meter reading,
+using **all available forward weather** up to ~7 days (target 168 h), capped at 10 days (240 h).
+If fewer hours exist (e.g. 6 days), that span is used; no fixed 168 h requirement.
+Use ``--backtest`` only for evaluation on the weather tail.
 
 Outputs in ``data_for_viz/`` per key ``<key>``:
   forecast_7d_pvlib_{key}.csv, forecast_7d_xgboost_{key}.csv,
@@ -52,7 +53,12 @@ except ImportError as e:
         "Missing dependency: scikit-learn. Install with: pip install scikit-learn\n" + str(e)
     ) from e
 
-FORECAST_HOURS = 168
+FORECAST_HOURS_TARGET = 168  # ~7 days (ideal)
+FORECAST_HOURS_MAX = 240  # ~10 days (cap)
+FORECAST_HOURS_MIN = 1
+FORECAST_HOURS = FORECAST_HOURS_TARGET  # backtest tail length
+
+_WEATHER_REQ = ("ghi", "dni", "dhi", "air_temp")
 
 DEFAULT_AZURE_ACCOUNT_URL = "https://leapdata.blob.core.windows.net"
 DEFAULT_AZURE_CONTAINER = "solar-forecasts-solcast"
@@ -113,13 +119,12 @@ def _ensure_pvlib_weather_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def load_solcast_live_from_azure(
+def _load_solcast_blobs_from_azure(
     *,
     account_url: str,
     container_name: str,
     sas_token: str,
-    campus: str,
-    live_min_timestamp: str | None = None,
+    name_predicate,
 ) -> pd.DataFrame:
     try:
         from azure.storage.blob import BlobServiceClient
@@ -128,17 +133,16 @@ def load_solcast_live_from_azure(
             "Azure mode requires: pip install azure-storage-blob\n" + str(e)
         ) from e
 
-    blob_service_client = BlobServiceClient(account_url=account_url, credential=sas_token)
-    container_client = blob_service_client.get_container_client(container_name)
+    container_client = BlobServiceClient(
+        account_url=account_url, credential=sas_token
+    ).get_container_client(container_name)
     csv_files = [
         b.name
         for b in container_client.list_blobs()
-        if "live" in b.name and b.name.endswith(".csv")
+        if name_predicate(b.name)
     ]
     if not csv_files:
-        raise RuntimeError(
-            f"No blobs matching 'live' + .csv in container {container_name!r}."
-        )
+        return pd.DataFrame()
 
     dataframes = []
     for name in csv_files:
@@ -148,8 +152,42 @@ def load_solcast_live_from_azure(
         temp_df = pd.read_csv(StringIO(text))
         temp_df["source_file"] = name
         dataframes.append(temp_df)
+    return pd.concat(dataframes, ignore_index=True)
 
-    solcast_live_df = pd.concat(dataframes, ignore_index=True)
+
+def load_solcast_live_from_azure(
+    *,
+    account_url: str,
+    container_name: str,
+    sas_token: str,
+    campus: str,
+    live_min_timestamp: str | None = None,
+    include_forecast_blobs: bool = True,
+) -> pd.DataFrame:
+    live_df = _load_solcast_blobs_from_azure(
+        account_url=account_url,
+        container_name=container_name,
+        sas_token=sas_token,
+        name_predicate=lambda n: "live" in n and n.endswith(".csv"),
+    )
+    if live_df.empty:
+        raise RuntimeError(
+            f"No blobs matching 'live' + .csv in container {container_name!r}."
+        )
+
+    parts = [live_df]
+    if include_forecast_blobs:
+        fc_df = _load_solcast_blobs_from_azure(
+            account_url=account_url,
+            container_name=container_name,
+            sas_token=sas_token,
+            name_predicate=lambda n: "forecast" in n and n.endswith(".csv"),
+        )
+        if not fc_df.empty:
+            print(f"  Also loaded forecast blobs: {len(fc_df):,} rows")
+            parts.append(fc_df)
+
+    solcast_live_df = pd.concat(parts, ignore_index=True)
     if "accessed_on" in solcast_live_df.columns:
         solcast_live_df["accessed_on"] = pd.to_datetime(solcast_live_df["accessed_on"], errors="coerce")
     solcast_live_df["timestamp"] = pd.to_datetime(solcast_live_df["timestamp"], errors="coerce")
@@ -337,109 +375,142 @@ def _validate_backtest_weather(hist_weather: pd.DataFrame, fs: pd.Timestamp, fe:
         )
 
 
-def _slice_historical_forecast_hours(
+def _slice_forecast_hours(
     weather: pd.DataFrame,
     forecast_start: pd.Timestamp,
     *,
-    allow_gaps: bool,
-) -> tuple[pd.DataFrame, pd.Timestamp, pd.Timestamp]:
-    """Hourly weather grid [fs, fs+168h) for local PVLib forecast."""
+    allow_gaps: bool = True,
+) -> tuple[pd.DataFrame, pd.Timestamp, pd.Timestamp, int]:
+    """
+    Use available weather from preferred start forward (up to 10 d cap), not a fixed 168 h grid.
+    If the anchor is after all weather, use the trailing window ending at the last hour.
+    """
     df = weather.sort_values("timestamp").copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.floor("h")
     df = df.drop_duplicates(subset=["timestamp"], keep="last")
+    if df.empty:
+        raise RuntimeError("Weather frame is empty.")
 
-    fs = pd.Timestamp(forecast_start).floor("h")
-    fe = fs + pd.Timedelta(hours=FORECAST_HOURS)
-    idx = pd.date_range(start=fs, periods=FORECAST_HOURS, freq="h")
+    lo = pd.Timestamp(df["timestamp"].min()).floor("h")
+    hi = pd.Timestamp(df["timestamp"].max()).floor("h")
+    fs_pref = pd.Timestamp(forecast_start).floor("h")
+
+    n_avail = int((hi - lo).total_seconds() / 3600) + 1
+    if n_avail < FORECAST_HOURS_MIN:
+        raise RuntimeError(
+            f"Weather only spans {n_avail} hour(s) ({lo} → {hi}); "
+            f"need at least {FORECAST_HOURS_MIN}."
+        )
+
+    window_note = "forward_from_anchor"
+    if fs_pref <= hi:
+        end_cap = fs_pref + pd.Timedelta(hours=FORECAST_HOURS_MAX - 1)
+        end_ts = min(hi, end_cap)
+        idx = pd.date_range(start=fs_pref, end=end_ts, freq="h")
+    else:
+        n_take = min(n_avail, FORECAST_HOURS_MAX)
+        fs_pref = hi - pd.Timedelta(hours=n_take - 1)
+        idx = pd.date_range(start=fs_pref, periods=n_take, freq="h")
+        window_note = "trailing_before_anchor"
+        print(
+            f"  Note: preferred start {pd.Timestamp(forecast_start).floor('h')} is after "
+            f"weather end {hi}; using last {n_take} h of available weather."
+        )
+
     df_idx = df.set_index("timestamp").sort_index()
     block = df_idx.reindex(idx)
-    if block[["ghi", "dni", "dhi", "air_temp"]].isna().all(axis=None):
+    if block[list(_WEATHER_REQ)].isna().all(axis=None):
         raise RuntimeError(
-            f"No historical weather overlaps forecast grid starting {fs}. "
-            "Check Solcast CSV range or use --azure-live for future hours."
+            f"No weather overlaps forecast grid starting {idx[0]}. "
+            "Extend Solcast (live/forecast blobs) or pass --forecast-start."
         )
+
+    has_data = block[list(_WEATHER_REQ)].notna().any(axis=1)
+    if not has_data.any():
+        raise RuntimeError("No usable weather hours in forecast window.")
+    first_good = has_data[has_data].index[0]
+    last_good = has_data[has_data].index[-1]
+    block = block.loc[first_good:last_good]
 
     if allow_gaps:
-        w_max = df_idx.index.max()
-        if w_max < fe - pd.Timedelta(hours=1):
-            print(
-                f"  Note: historical weather ends {w_max}; "
-                f"forward-filling through {fe - pd.Timedelta(hours=1)} for the 7-day window."
-            )
-        block = block.interpolate(limit_direction="both")
-        block = block.ffill().bfill()
-    elif block[["ghi", "dni", "dhi", "air_temp"]].isna().any().any():
-        missing = block[block[["ghi", "dni", "dhi", "air_temp"]].isna().any(axis=1)].index
+        block = block.interpolate(limit_direction="both").ffill().bfill()
+    elif block[list(_WEATHER_REQ)].isna().any().any():
+        missing = block[block[list(_WEATHER_REQ)].isna().any(axis=1)].index
         raise RuntimeError(
-            f"Backtest window has {len(missing)} hour(s) without weather "
-            f"(first gap {missing[0]}). Check hourly continuity in the Solcast CSV."
+            f"Forecast window has {len(missing)} hour(s) without weather "
+            f"(first gap {missing[0]})."
         )
 
-    if block[["ghi", "dni", "dhi", "air_temp"]].isna().any().any():
+    if block[list(_WEATHER_REQ)].isna().any().any():
         raise RuntimeError(
-            "Could not fill all weather hours for the 7-day window; missing data after reindex."
+            "Could not fill all weather hours for the forecast window."
         )
+
+    fs_out = pd.Timestamp(block.index[0])
+    fe_out = pd.Timestamp(block.index[-1]) + pd.Timedelta(hours=1)
+    n_hours = len(block)
+
+    if n_hours < FORECAST_HOURS_MIN:
+        raise RuntimeError(
+            f"Only {n_hours} forecast hour(s) after trim; need at least {FORECAST_HOURS_MIN}."
+        )
+
+    print(
+        f"  Forecast span: {n_hours} h (~{n_hours / 24:.1f} d)  "
+        f"[{fs_out} → {fe_out})  ({window_note})"
+    )
+    if n_hours < FORECAST_HOURS_TARGET:
+        print(
+            f"  Note: less than target {FORECAST_HOURS_TARGET} h (~7 d); "
+            "using all available forward weather."
+        )
+    elif n_hours >= FORECAST_HOURS_MAX:
+        print(f"  Note: capped at {FORECAST_HOURS_MAX} h (~10 d) of weather.")
 
     out = block.reset_index()
     if "timestamp" not in out.columns:
         out = out.rename(columns={out.columns[0]: "timestamp"})
-    req = ["ghi", "dni", "dhi", "air_temp"]
-    for c in req:
+    for c in _WEATHER_REQ:
         if c not in out.columns:
             raise ValueError(f"Weather slice missing {c}")
     extra = [c for c in ("zenith", "wind_speed_10m", "albedo") if c in df.columns]
     for c in extra:
         if c not in out.columns and c in df_idx.columns:
-            out[c] = df_idx.reindex(idx)[c].values
-    return out, fs, fe
+            out[c] = df_idx.reindex(block.index)[c].values
+    return out, fs_out, fe_out, n_hours
 
 
-def _align_fs_to_live_span(
-    fs: pd.Timestamp,
-    lo: pd.Timestamp,
-    hi: pd.Timestamp,
+def _slice_historical_forecast_hours(
+    weather: pd.DataFrame,
+    forecast_start: pd.Timestamp,
     *,
-    auto_chosen_start: bool,
-) -> pd.Timestamp:
-    span_needed = pd.Timedelta(hours=FORECAST_HOURS - 1)
-    if hi - lo < span_needed:
+    allow_gaps: bool,
+) -> tuple[pd.DataFrame, pd.Timestamp, pd.Timestamp, int]:
+    """Strict 168 h tail for --backtest; flexible span for forward local mode."""
+    if allow_gaps:
+        return _slice_forecast_hours(weather, forecast_start, allow_gaps=True)
+
+    fs = pd.Timestamp(forecast_start).floor("h")
+    fe = fs + pd.Timedelta(hours=FORECAST_HOURS)
+    idx = pd.date_range(start=fs, periods=FORECAST_HOURS, freq="h")
+    df_idx = (
+        weather.sort_values("timestamp")
+        .assign(timestamp=lambda d: pd.to_datetime(d["timestamp"]).dt.floor("h"))
+        .drop_duplicates(subset=["timestamp"], keep="last")
+        .set_index("timestamp")
+        .sort_index()
+    )
+    block = df_idx.reindex(idx)
+    if block[list(_WEATHER_REQ)].isna().any().any():
+        missing = block[block[list(_WEATHER_REQ)].isna().any(axis=1)].index
         raise RuntimeError(
-            f"Live weather only spans {(hi - lo).total_seconds() / 3600:.0f} h ({lo} → {hi}); "
-            f"need at least {FORECAST_HOURS} consecutive hours."
+            f"Backtest window has {len(missing)} hour(s) without weather "
+            f"(first gap {missing[0]})."
         )
-
-    if lo.tzinfo is None and fs.tzinfo is not None:
-        fs = fs.tz_localize(None)
-    elif lo.tzinfo is not None and fs.tzinfo is None:
-        fs = fs.tz_localize(lo.tzinfo, ambiguous=True, nonexistent="shift_forward")
-    elif lo.tzinfo is not None and fs.tzinfo is not None:
-        fs = fs.tz_convert(lo.tzinfo)
-
-    fs = fs.floor("h")
-
-    if fs + span_needed > hi:
-        if auto_chosen_start:
-            fs = hi - span_needed
-            print(
-                f"  Note: live feed ends {hi}; using last {FORECAST_HOURS} h "
-                f"(forecast start {fs})."
-            )
-        else:
-            raise RuntimeError(
-                f"A 168 h window from --forecast-start {fs} extends past live data (last hour {hi}). "
-                f"Use --forecast-start on or before {(hi - span_needed)}."
-            )
-
-    if fs < lo:
-        if auto_chosen_start:
-            fs = lo
-            print(f"  Note: adjusted forecast start to first live hour {lo}.")
-        else:
-            raise RuntimeError(
-                f"--forecast-start {fs} is before live data ({lo})."
-            )
-
-    return fs
+    out = block.reset_index()
+    if "timestamp" not in out.columns:
+        out = out.rename(columns={out.columns[0]: "timestamp"})
+    return out, fs, fe, FORECAST_HOURS
 
 
 def _slice_live_forecast_hours(
@@ -447,49 +518,14 @@ def _slice_live_forecast_hours(
     forecast_start: pd.Timestamp | None,
     *,
     align_auto: bool = True,
-) -> tuple[pd.DataFrame, pd.Timestamp, pd.Timestamp]:
-    df = live_weather.sort_values("timestamp").copy()
-    df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.floor("h")
-    df = df.drop_duplicates(subset=["timestamp"], keep="last")
-
-    lo = df["timestamp"].min()
-    hi = df["timestamp"].max()
-    auto = align_auto and forecast_start is None
-    if forecast_start is None:
-        fs = pd.Timestamp.now().replace(minute=0, second=0, microsecond=0)
+) -> tuple[pd.DataFrame, pd.Timestamp, pd.Timestamp, int]:
+    if forecast_start is None and align_auto:
+        fs_in = pd.Timestamp.now().replace(minute=0, second=0, microsecond=0)
+    elif forecast_start is None:
+        fs_in = pd.Timestamp.now().replace(minute=0, second=0, microsecond=0)
     else:
-        fs = pd.Timestamp(forecast_start)
-
-    fs = _align_fs_to_live_span(fs, lo, hi, auto_chosen_start=auto)
-
-    fe = fs + pd.Timedelta(hours=FORECAST_HOURS)
-    idx = pd.date_range(start=fs, periods=FORECAST_HOURS, freq="h")
-    df_idx = df.set_index("timestamp").sort_index()
-    block = df_idx.reindex(idx)
-    if block[["ghi", "dni", "dhi", "air_temp"]].isna().all(axis=None):
-        raise RuntimeError(
-            f"No live weather overlaps forecast grid starting {fs}. "
-            "Check blob data range or pass --forecast-start."
-        )
-    block = block.interpolate(limit_direction="both")
-    block = block.ffill().bfill()
-    if block[["ghi", "dni", "dhi", "air_temp"]].isna().any().any():
-        raise RuntimeError(
-            "Could not fill all weather hours for the 7-day window; missing data after reindex."
-        )
-
-    out = block.reset_index()
-    if "timestamp" not in out.columns:
-        out = out.rename(columns={out.columns[0]: "timestamp"})
-    req = ["ghi", "dni", "dhi", "air_temp"]
-    for c in req:
-        if c not in out.columns:
-            raise ValueError(f"Live slice missing {c}")
-    extra = [c for c in ("zenith", "wind_speed_10m", "albedo") if c in df.columns]
-    for c in extra:
-        if c not in out.columns and c in df_idx.columns:
-            out[c] = df_idx.reindex(idx)[c].values
-    return out, fs, fe
+        fs_in = pd.Timestamp(forecast_start)
+    return _slice_forecast_hours(live_weather, fs_in, allow_gaps=True)
 
 
 def _hourly_master_csv_path(building_key: str, out_dir: str) -> str:
@@ -613,9 +649,9 @@ def process_building_forecast(
             )
             print(
                 f"  Forecast anchor ({forecast_anchor_source}): "
-                f"7×24 h from {fs_in} (midnight after last reading day)"
+                f"from {fs_in} (midnight after last reading day), flexible span"
             )
-        live_7d, fs, fe = _slice_live_forecast_hours(
+        live_7d, fs, fe, n_forecast_hours = _slice_live_forecast_hours(
             live_raw, fs_in, align_auto=align_auto
         )
         mode = "azure_live"
@@ -663,7 +699,6 @@ def process_building_forecast(
                     building_key=key,
                 )
             )
-            fe = fs + pd.Timedelta(hours=FORECAST_HOURS)
             mode = "forward"
             last_meter_reading = last_ts.isoformat()
             print(
@@ -671,10 +706,8 @@ def process_building_forecast(
             )
             print(
                 f"  Forecast anchor ({forecast_anchor_source}): "
-                f"7×24 h from {fs} (midnight after last reading day)"
+                f"from {fs} (midnight after last reading day), flexible span"
             )
-
-        print(f"  Forecast mode: {mode}  window: [{fs}, {fe})")
 
         train_df = merged_valid[merged_valid["timestamp"] < fs].copy()
         if len(train_df) < 500:
@@ -683,11 +716,12 @@ def process_building_forecast(
                 "Check meter/weather overlap or use --backtest with longer history."
             )
 
-        local_weather, fs, fe = _slice_historical_forecast_hours(
+        local_weather, fs, fe, n_forecast_hours = _slice_historical_forecast_hours(
             hist_weather,
             fs,
             allow_gaps=(mode != "backtest"),
         )
+        print(f"  Forecast mode: {mode}  window: [{fs}, {fe})")
         forecast_exp = pv_mod.build_expected(
             local_weather,
             system_dc_w=bldg["system_dc_w"],
@@ -696,10 +730,6 @@ def process_building_forecast(
             surface_azimuth_deg=bldg["surface_azimuth_deg"],
         )
         forecast_base = _attach_weather_extras(forecast_exp, local_weather)
-        if len(forecast_base) != FORECAST_HOURS:
-            raise ValueError(
-                f"Expected {FORECAST_HOURS} forecast hours, got {len(forecast_base)}."
-            )
         weather_meta = os.path.abspath(historical_weather_csv)
 
     print(f"  Training XGBoost ({len(train_df):,} hours) …")
@@ -751,7 +781,9 @@ def process_building_forecast(
         "forecast_mode": mode,
         "forecast_start": fs.isoformat(),
         "forecast_end": fe.isoformat(),
-        "forecast_hours": FORECAST_HOURS,
+        "forecast_hours": n_forecast_hours,
+        "forecast_hours_target": FORECAST_HOURS_TARGET,
+        "forecast_hours_max": FORECAST_HOURS_MAX,
         "train_hours_used": len(train_df),
         "val_mae_kwh_per_h": mae_va,
         "historical_weather_csv": os.path.abspath(historical_weather_csv),
@@ -779,6 +811,7 @@ def process_building_forecast(
 
 
 def main() -> None:
+    config.load_credentials()
     ap = argparse.ArgumentParser(
         description="7d PVLib + XGBoost forecast for meters in config._BUILDING_PVLIB_GEOMETRY"
     )
@@ -866,8 +899,8 @@ def main() -> None:
             )
     else:
         print(
-            "Mode: per-meter — 7 days from midnight after each meter's last reading day "
-            "(meter CSV + hourly_<key>_master.csv)."
+            "Mode: per-meter — flexible span (target ~7 d, max 10 d) from midnight after "
+            "each meter's last reading day."
         )
 
     print("\nLoading historical weather (training) …")
@@ -882,7 +915,7 @@ def main() -> None:
     live_raw: pd.DataFrame | None = None
     if args.azure_live:
         campus_live = (args.campus or "BUNDOORA").strip().upper()
-        sas = (os.environ.get("AZURE_STORAGE_SAS_TOKEN") or "").strip() or _DEFAULT_AZURE_SAS_FROM_NOTEBOOK
+        sas = config.env_value("AZURE_STORAGE_SAS_TOKEN") or _DEFAULT_AZURE_SAS_FROM_NOTEBOOK
         print(f"\nLoading live Solcast from Azure ({args.azure_container}) campus={campus_live} …")
         live_raw = load_solcast_live_from_azure(
             account_url=args.azure_account_url.rstrip("/"),

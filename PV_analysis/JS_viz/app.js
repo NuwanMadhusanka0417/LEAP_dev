@@ -1,12 +1,7 @@
 /**
  * Tabbed dashboard: loads PV_analysis/data_for_viz CSVs per selected meter.
  */
-import {
-  parseCSV,
-  parseHour,
-  tryFetchPvlibFile,
-  purgeAllPlotlyInRoot,
-} from "./utils.js";
+import { parseCSV, parseHour, purgeAllPlotlyInRoot } from "./utils.js";
 import {
   loadMeterCatalog,
   fetchHourlyMasterText,
@@ -21,19 +16,17 @@ import { renderSeasonIrradiance } from "./tab_season_irradiance.js";
 import { renderMeterDegradation } from "./tab_degradation.js";
 import { renderForecast } from "./tab_forecast.js";
 
-const PRECOMPUTED_PVLIB_HOURLY = "expected_power_pvlib_cleaned_v2.csv";
-
 let state = {
   meters: [],
   meterKey: "library",
   meterLabel: "Library",
   hourly: [],
   forecastCombined: [],
+  forecastStaleHint: "",
   dateFrom: "",
   dateTo: "",
   dataMin: "",
   dataMax: "",
-  hasSecondModelBaseline: false,
 };
 
 function siteCtx() {
@@ -54,6 +47,14 @@ function addMonths(isoStr, n) {
   const d = new Date(isoStr + "T12:00:00");
   d.setMonth(d.getMonth() + n);
   return isoFromDate(d);
+}
+
+/** Last ``n`` calendar months ending at ``endIso`` (clamped to ``minIso``). */
+function trailingMonthsRange(endIso, minIso, n) {
+  const to = endIso;
+  let from = addMonths(endIso, -n);
+  if (from < minIso) from = minIso;
+  return { from, to };
 }
 
 function normalizeHourly(rows) {
@@ -85,28 +86,41 @@ function normalizeHourly(rows) {
   return out.sort((a, b) => a.ts - b.ts);
 }
 
-function mergeLegacyFromPrecomputedHourly(hourly, pvlibRows) {
-  const map = new Map();
-  for (const r of pvlibRows) {
-    const k = (r.timestamp ?? "").trim();
-    if (!k) continue;
-    const v = Number(r.expected_kwh);
-    if (Number.isFinite(v)) map.set(k, v);
-  }
-  let filled = 0;
-  for (const row of hourly) {
-    if (Number.isFinite(row.legacy)) continue;
-    const v = map.get(row.tsStr);
-    if (Number.isFinite(v)) {
-      row.legacy = v;
-      filled++;
-    }
-  }
-  return filled;
+/** Midnight on the calendar day after the last hourly meter timestamp. */
+function forecastAnchorFromHourly(hourly) {
+  if (!hourly.length) return null;
+  const last = hourly[hourly.length - 1].ts;
+  const d = new Date(last.getTime());
+  d.setDate(d.getDate() + 1);
+  d.setHours(0, 0, 0, 0);
+  return d;
 }
 
-function refreshSecondModelFlag() {
-  state.hasSecondModelBaseline = state.hourly.some((r) => Number.isFinite(r.legacy));
+/**
+ * Keep only forward forecast hours (after last meter reading day).
+ * Drops stale backtest CSV rows (e.g. February) when a fresh May–June file exists.
+ */
+function filterForwardForecast(hourly, forecastRows) {
+  if (!forecastRows.length) {
+    return { rows: [], staleHint: "" };
+  }
+  const anchor = forecastAnchorFromHourly(hourly);
+  if (!anchor) {
+    return { rows: forecastRows, staleHint: "" };
+  }
+  const forward = forecastRows.filter((r) => r.ts >= anchor);
+  if (forward.length) {
+    return { rows: forward, staleHint: "" };
+  }
+  const t0 = forecastRows[0].tsStr;
+  const t1 = forecastRows[forecastRows.length - 1].tsStr;
+  const anchorStr = anchor.toISOString().slice(0, 16).replace("T", " ");
+  return {
+    rows: [],
+    staleHint:
+      `Loaded forecast file ends at ${t1}, but the current meter data expects forward hours from ${anchorStr}. ` +
+      "Re-run: python 4_forecast_7d_pvlib_xgboost.py --campus BUNDOORA (or python run_pipeline.py).",
+  };
 }
 
 function normalizeForecastCombined(rows) {
@@ -145,10 +159,7 @@ function setDateBoundsAndDefault() {
   toInput.min = mn;
   toInput.max = mx;
 
-  let from = mn;
-  let to = addMonths(mn, 1);
-  if (to > mx) to = mx;
-  if (from > to) to = mx;
+  const { from, to } = trailingMonthsRange(mx, mn, 3);
 
   state.dateFrom = from;
   state.dateTo = to;
@@ -167,11 +178,10 @@ function updateLoadStatus(extra = "") {
   status.textContent =
     `${site} · ${state.hourly.length.toLocaleString()} hourly rows` +
     (state.forecastCombined.length
-      ? ` · Forecast: ${state.forecastCombined.length} h`
-      : " · Forecast: not found") +
-    (state.hasSecondModelBaseline
-      ? " · Real baseline: yes"
-      : "") +
+      ? ` · Forecast: ${state.forecastCombined.length} h forward`
+      : state.forecastStaleHint
+        ? " · Forecast: stale/missing"
+        : " · Forecast: not found") +
     (extra ? ` · ${extra}` : "");
 }
 
@@ -185,22 +195,14 @@ async function loadMeterData(meterKey) {
   const { rows: hRows } = parseCSV(hourlyText);
   state.hourly = normalizeHourly(hRows);
 
-  const pv = await tryFetchPvlibFile(PRECOMPUTED_PVLIB_HOURLY);
-  if (pv) {
-    const { rows: pRows } = parseCSV(pv.text);
-    const nFill = mergeLegacyFromPrecomputedHourly(state.hourly, pRows);
-    if (nFill > 0) {
-      console.info(
-        `[${key}] Filled Real baseline from ${PRECOMPUTED_PVLIB_HOURLY} for ${nFill.toLocaleString()} rows.`
-      );
-    }
-  }
-  refreshSecondModelFlag();
-
   const fcRes = await tryFetchForecastCombinedText(key);
+  state.forecastStaleHint = "";
   if (fcRes) {
     const { rows: fcRows } = parseCSV(fcRes.text);
-    state.forecastCombined = normalizeForecastCombined(fcRows);
+    const normalized = normalizeForecastCombined(fcRows);
+    const { rows, staleHint } = filterForwardForecast(state.hourly, normalized);
+    state.forecastCombined = rows;
+    state.forecastStaleHint = staleHint;
   } else {
     state.forecastCombined = [];
   }
@@ -235,6 +237,7 @@ async function onMeterChange() {
   } catch (e) {
     state.hourly = [];
     state.forecastCombined = [];
+    state.forecastStaleHint = "";
     updateLoadStatus(e.message);
     console.error(e);
     const panel = document.getElementById(`panel-${activeTab}`);
@@ -253,14 +256,13 @@ function applyGlobalPreset(preset) {
   let to = mx;
 
   if (preset === "week") {
-    to = addDays(mn, 7);
-    if (to > mx) to = mx;
+    from = addDays(mx, -7);
+    if (from < mn) from = mn;
+    to = mx;
   } else if (preset === "month") {
-    to = addMonths(mn, 1);
-    if (to > mx) to = mx;
+    ({ from, to } = trailingMonthsRange(mx, mn, 1));
   } else if (preset === "quarter") {
-    to = addMonths(mn, 3);
-    if (to > mx) to = mx;
+    ({ from, to } = trailingMonthsRange(mx, mn, 3));
   } else if (preset === "all") {
     from = mn;
     to = mx;
@@ -355,7 +357,7 @@ function showTab(id) {
     renderForecast(
       document.getElementById("panel-forecast"),
       state.forecastCombined,
-      ctx,
+      { ...ctx, staleHint: state.forecastStaleHint },
     );
   }
 }
