@@ -2,9 +2,9 @@
 """
 Incremental download of meter readings (SQL Server) and Solcast weather (Azure blobs).
 
-Appends only rows newer than the last timestamp in existing raw CSVs under data_raw/:
-  - SolarMeterReadings1hour_2020_2025.csv  (columns: timestamp, meter, meter_reading)
-  - solcast_df_2020_2025.csv
+Meters: append only rows newer than the last timestamp per meter.
+Weather: re-fetch from Azure for the last ``SOLCAST_REFRESH_DAYS`` (14) before the
+file's last timestamp per campus, plus any newer hours — live values replace stale forecast rows.
 
 Credentials: copy ``.env.example`` → ``.env`` in this folder (auto-loaded), or export env vars.
 
@@ -201,24 +201,32 @@ def merge_solcast_frames(
     )
 
 
-def filter_solcast_after_last(
+def filter_solcast_refresh_window(
     live: pd.DataFrame,
     last_by_campus: dict[str, pd.Timestamp],
+    *,
+    refresh_days: int | None = None,
 ) -> pd.DataFrame:
+    """Keep Azure rows from (last_timestamp - refresh_days) onward for each campus."""
     if live.empty:
         return live
+    refresh_days = config.SOLCAST_REFRESH_DAYS if refresh_days is None else refresh_days
+    window = pd.Timedelta(days=int(refresh_days))
+
     if "campus" not in live.columns:
         cutoff = max(last_by_campus.values()) if last_by_campus else None
         if cutoff is None:
             return live
-        return live[live["timestamp"] > cutoff].copy()
+        refresh_from = cutoff - window
+        return live[live["timestamp"] >= refresh_from].copy()
 
     chunks = []
     for campus, grp in live.groupby("campus", sort=False):
         campus_u = str(campus).strip().upper()
         cutoff = last_by_campus.get(campus_u)
         if cutoff is not None:
-            grp = grp[grp["timestamp"] > cutoff]
+            refresh_from = cutoff - window
+            grp = grp[grp["timestamp"] >= refresh_from]
         if not grp.empty:
             chunks.append(grp)
     if not chunks:
@@ -421,18 +429,23 @@ def download_weather(*, out_path: str, campus_filter: str | None, dry_run: bool)
     combined = normalize_solcast_live(
         pd.concat(live_frames + forecast_frames, ignore_index=True)
     )
-    new_rows = filter_solcast_after_last(combined, last_by_campus)
+    new_rows = filter_solcast_refresh_window(combined, last_by_campus)
     if campus_filter:
         campus_u = campus_filter.strip().upper()
         new_rows = new_rows[new_rows["campus"].astype(str).str.upper() == campus_u].copy()
 
     if new_rows.empty:
-        print("  No new weather rows after last timestamp.")
+        print("  No weather rows in refresh window.")
         return 0
 
+    refresh_note = (
+        f"(refresh last {config.SOLCAST_REFRESH_DAYS} d before file max per campus)"
+        if last_by_campus
+        else "(initial load)"
+    )
     print(
-        f"  New weather rows: {len(new_rows):,}  "
-        f"{new_rows['timestamp'].min()} → {new_rows['timestamp'].max()}"
+        f"  Weather rows to merge: {len(new_rows):,}  "
+        f"{new_rows['timestamp'].min()} → {new_rows['timestamp'].max()}  {refresh_note}"
     )
     if dry_run:
         print("  [dry-run] would append weather rows")

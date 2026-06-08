@@ -273,13 +273,23 @@ def load_solcast_data(path=None, prefer_cleaned=True, merge_raw_extension=False)
         if os.path.isfile(raw_primary):
             raw = _normalize_solcast_timestamps(pd.read_csv(raw_primary))
             if cutoff is not None:
-                extra = raw[raw["timestamp"] > cutoff]
+                refresh_days = (
+                    _pv_config.SOLCAST_REFRESH_DAYS if _pv_config is not None else 14
+                )
+                refresh_from = cutoff - pd.Timedelta(days=refresh_days)
+                extra = raw[raw["timestamp"] >= refresh_from]
             else:
                 extra = raw
             if len(extra):
+                refresh_days = (
+                    _pv_config.SOLCAST_REFRESH_DAYS if _pv_config is not None else 14
+                )
                 print(
-                    f"  Solcast: appending {len(extra)} raw row(s) after "
-                    f"{cutoff if cutoff is not None else 'start'}"
+                    f"  Solcast: merging {len(extra)} raw row(s) from "
+                    f"{extra['timestamp'].min()} (refresh last {refresh_days} d "
+                    f"before cleaned max {cutoff})"
+                    if cutoff is not None
+                    else f"  Solcast: loading {len(extra)} raw row(s) (no prior cleaned file)"
                 )
                 parts.append(extra)
         if parts:

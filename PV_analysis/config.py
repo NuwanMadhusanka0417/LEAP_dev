@@ -106,6 +106,8 @@ def env_value(key: str, *, allow_placeholder: bool = False) -> str:
 # Weather: cleaned hourly Bundoora series (place file in data_cleaned/)
 SOLCAST_CLEANED_V2 = os.path.join(DATA_DIR, "solcast_df_cleaned_2020_2025.csv")
 SOLCAST_RAW_MULTI = os.path.join(DATA_DIR, "solcast_df.csv")
+# Re-fetch Solcast from Azure for this many days before the file's last timestamp (live replaces forecast).
+SOLCAST_REFRESH_DAYS = 14
 
 # Meter readings (hourly) — prefer long-range cleaned file from 1_data_cleaning.py
 _METER_CLEANED_LONG = os.path.join(DATA_DIR, "SolarMeterReadings1hour_cleaned_2020_2025.csv")
