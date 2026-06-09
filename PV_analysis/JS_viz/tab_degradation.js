@@ -3,12 +3,8 @@
  * **monthly H** for medium-term detail (slope vs elapsed calendar days).
  *
  * **H = Σ actual ÷ Σ PVLib expected** (daylight hours only, **GHI > 5 W/m²**).
- *
- * **Yearly H**: one ratio per calendar year; regression vs year gives ΔH **per year**;
- * **~%/yr** ≈ (slope / mean(H)) × 100%.
  */
 import {
-  linearRegression,
   plotlyDarkTheme,
   nextPlotDomId,
   purgePlotlyInContainer,
@@ -17,129 +13,17 @@ import {
   PLOTLY_STATIC,
 } from "./utils.js";
 import { siteHeading } from "./meters.js";
+import {
+  yearlyPerformanceRatio,
+  monthlyPerformanceRatio,
+  regressOnCalendarYears,
+  regressOnElapsedDays,
+  computeDegradationMetrics,
+  formatPctPerYear,
+  MIN_POINTS_MONTHLY,
+  MIN_POINTS_YEARLY,
+} from "./degradation_common.js";
 
-const MIN_POINTS_MONTHLY = 4;
-/** Minimum calendar years for an OLS line (interpret cautiously if only 2). */
-const MIN_POINTS_YEARLY = 2;
-
-function regressOnElapsedDays(datesIso, y) {
-  const n = Math.min(datesIso.length, y.length);
-  if (n < 2) return { slope: NaN, intercept: NaN, fitY: [] };
-  const t0 = new Date(datesIso[0] + "T12:00:00").getTime();
-  const x = datesIso.map((d) =>
-    (new Date(d + "T12:00:00").getTime() - t0) / 86400000,
-  );
-  const reg = linearRegression(x.slice(0, n), y.slice(0, n));
-  if (!Number.isFinite(reg.slope))
-    return { slope: NaN, intercept: NaN, fitY: [] };
-  const fitY = x.slice(0, n).map((xi) => reg.slope * xi + reg.intercept);
-  return { slope: reg.slope, intercept: reg.intercept, fitY };
-}
-
-/** x = 0,1,2,… calendar years from first year → slope is ΔH per calendar year. */
-function regressOnCalendarYears(yearStrings, y) {
-  const n = Math.min(yearStrings.length, y.length);
-  if (n < 2) return { slope: NaN, intercept: NaN, fitY: [] };
-  const y0 = parseInt(yearStrings[0], 10);
-  if (!Number.isFinite(y0)) return { slope: NaN, intercept: NaN, fitY: [] };
-  const x = yearStrings.map((ys) => parseInt(ys, 10) - y0);
-  const reg = linearRegression(x.slice(0, n), y.slice(0, n));
-  if (!Number.isFinite(reg.slope))
-    return { slope: NaN, intercept: NaN, fitY: [] };
-  const fitY = x.slice(0, n).map((xi) => reg.slope * xi + reg.intercept);
-  return { slope: reg.slope, intercept: reg.intercept, fitY };
-}
-
-/** One performance ratio per yyyy from daylight hours only (GHI > 5). */
-function yearlyPerformanceRatio(hourlyFiltered) {
-  const byY = new Map();
-  for (const r of hourlyFiltered) {
-    if (!(r.ghi > 5)) continue;
-    const key = r.day.slice(0, 4);
-    let o = byY.get(key);
-    if (!o) {
-      o = { act: 0, exp: 0 };
-      byY.set(key, o);
-    }
-    if (Number.isFinite(r.actual)) o.act += r.actual;
-    if (Number.isFinite(r.expected)) o.exp += r.expected;
-  }
-  const years = [...byY.keys()].sort();
-  const ratio = years.map((yy) => {
-    const { act, exp } = byY.get(yy);
-    return exp > 0 ? act / exp : NaN;
-  });
-  return { years, ratio };
-}
-
-/** One performance ratio per yyyy-mm from daylight hours only (GHI > 5). */
-function monthlyPerformanceRatio(hourlyFiltered) {
-  const byM = new Map();
-  for (const r of hourlyFiltered) {
-    if (!(r.ghi > 5)) continue;
-    const key = r.day.slice(0, 7);
-    let o = byM.get(key);
-    if (!o) {
-      o = { act: 0, exp: 0 };
-      byM.set(key, o);
-    }
-    if (Number.isFinite(r.actual)) o.act += r.actual;
-    if (Number.isFinite(r.expected)) o.exp += r.expected;
-  }
-  const months = [...byM.keys()].sort();
-  const ratio = months.map((m) => {
-    const { act, exp } = byM.get(m);
-    return exp > 0 ? act / exp : NaN;
-  });
-  const monthStarts = months.map((m) => `${m}-01`);
-  return { monthStarts, ratio };
-}
-
-/** Daily/monthly regression: slope is per calendar day. */
-function pctPerYearFromDailySlope(slope, meanH) {
-  if (
-    !Number.isFinite(slope) ||
-    !Number.isFinite(meanH) ||
-    meanH < 1e-9
-  )
-    return NaN;
-  return (slope * 365 * 100) / meanH;
-}
-
-/** Yearly regression: slope is already ΔH per calendar year. */
-function pctPerYearFromAnnualSlope(slope, meanH) {
-  if (
-    !Number.isFinite(slope) ||
-    !Number.isFinite(meanH) ||
-    meanH < 1e-9
-  )
-    return NaN;
-  return (slope * 100) / meanH;
-}
-
-function buildTrendChartLayout(theme, title, yTitle, sz, annotations) {
-  return {
-    ...theme,
-    autosize: false,
-    width: sz.width,
-    height: Math.max(280, sz.height),
-    title: { text: title, font: { color: "#e2e8f0", size: 14 } },
-    margin: { t: 52, r: 24, b: 52, l: 56 },
-    hovermode: "x unified",
-    xaxis: { ...theme.xaxis, type: "date", title: "Date" },
-    yaxis: { ...theme.yaxis, title: yTitle },
-    legend: {
-      orientation: "h",
-      y: 1.05,
-      x: 0,
-      bgcolor: "rgba(15,23,42,0.7)",
-      font: { size: 11 },
-    },
-    annotations: annotations || [],
-  };
-}
-
-/** Monthly H: tick labels like Jan 2024; spaced ticks so long spans stay readable. */
 function buildMonthlyHChartLayout(theme, title, yTitle, sz, annotations, nMonths) {
   const dtick =
     nMonths <= 10 ? "M1" : nMonths <= 24 ? "M2" : nMonths <= 48 ? "M3" : "M6";
@@ -243,23 +127,14 @@ export function renderMeterDegradation(container, hourly, dateFrom, dateTo, site
     monthDays.length >= MIN_POINTS_MONTHLY
       ? regressOnElapsedDays(monthDays, monthY)
       : { slope: NaN, intercept: NaN, fitY: [] };
-  const meanYearly = yearY.length
-    ? yearY.reduce((a, b) => a + b, 0) / yearY.length
-    : NaN;
-  const meanMonthly = monthY.length
-    ? monthY.reduce((a, b) => a + b, 0) / monthY.length
-    : NaN;
-  const pctY = pctPerYearFromAnnualSlope(yearlyReg.slope, meanYearly);
-  const pctM = pctPerYearFromDailySlope(monthlyReg.slope, meanMonthly);
+
+  const metrics = computeDegradationMetrics(hourly, dateFrom, dateTo);
+  const { meanYearly, meanMonthly, pctYearly: pctY, pctMonthly: pctM } = metrics;
 
   const fmtSlopeDay = (s) =>
     Number.isFinite(s) ? `${s.toFixed(8)} / day` : "—";
   const fmtSlopeYear = (s) =>
     Number.isFinite(s) ? `${s.toFixed(6)} / yr` : "—";
-  const fmtPct = (p) =>
-    Number.isFinite(p)
-      ? `${p >= 0 ? "+" : ""}${p.toFixed(2)} %/yr`
-      : "—";
 
   container.innerHTML = `
     <h2>${siteHeading("Meter degradation (performance vs PVLib)", site)}</h2>
@@ -303,14 +178,14 @@ export function renderMeterDegradation(container, hourly, dateFrom, dateTo, site
             <td>${yearLabels.length}</td>
             <td>${Number.isFinite(meanYearly) ? meanYearly.toFixed(4) : "—"}</td>
             <td>${yearLabels.length >= MIN_POINTS_YEARLY ? fmtSlopeYear(yearlyReg.slope) : `— <span style="color:#64748b">(need ≥${MIN_POINTS_YEARLY} yrs)</span>`}</td>
-            <td>${fmtPct(pctY)}</td>
+            <td>${formatPctPerYear(pctY)}</td>
           </tr>
           <tr>
             <td>Monthly</td>
             <td>${monthDays.length}</td>
             <td>${Number.isFinite(meanMonthly) ? meanMonthly.toFixed(4) : "—"}</td>
             <td>${monthDays.length >= MIN_POINTS_MONTHLY ? fmtSlopeDay(monthlyReg.slope) : `— <span style="color:#64748b">(need ≥${MIN_POINTS_MONTHLY} mo)</span>`}</td>
-            <td>${fmtPct(pctM)}</td>
+            <td>${formatPctPerYear(pctM)}</td>
           </tr>
         </tbody>
       </table>
@@ -374,7 +249,7 @@ export function renderMeterDegradation(container, hourly, dateFrom, dateTo, site
                   y: 0.98,
                   xanchor: "left",
                   yanchor: "top",
-                  text: `<b>Annual trend</b> ~${fmtPct(pctY)}`,
+                  text: `<b>Annual trend</b> ~${formatPctPerYear(pctY)}`,
                   showarrow: false,
                   font: { color: "#e2e8f0", size: 11 },
                   bgcolor: "rgba(15,23,42,0.75)",
@@ -441,7 +316,7 @@ export function renderMeterDegradation(container, hourly, dateFrom, dateTo, site
                   y: 0.98,
                   xanchor: "left",
                   yanchor: "top",
-                  text: `<b>Monthly</b> ~${fmtPct(pctM)}`,
+                  text: `<b>Monthly</b> ~${formatPctPerYear(pctM)}`,
                   showarrow: false,
                   font: { color: "#e2e8f0", size: 11 },
                   bgcolor: "rgba(15,23,42,0.75)",

@@ -6,6 +6,13 @@ export function formatTrendPct(pct) {
   return pct < 0 ? `\u2212${abs}` : `+${abs}`;
 }
 
+/** Avoid rounding tiny H values to 0.00 in footers. */
+export function formatHValue(v, decimals = 3) {
+  if (!Number.isFinite(v)) return "N/A";
+  if (v > 0 && v < 0.01) return v.toFixed(4);
+  return v.toFixed(decimals);
+}
+
 /**
  * @param {object} opt
  * @param {string} [opt.medianLabel]
@@ -22,7 +29,7 @@ export function seasonChartFooter(res, opt = {}) {
   } = opt;
   const { overall, degradPct, dayCount, ymeds } = res;
   const medStr = Number.isFinite(overall)
-    ? overall.toFixed(medianDecimals) + medianSuffix
+    ? formatHValue(overall, medianDecimals) + medianSuffix
     : "N/A";
 
   let badgeStyle =
@@ -44,8 +51,16 @@ export function seasonChartFooter(res, opt = {}) {
   const detail =
     ymeds && ymeds.length
       ? ymeds
-          .map((d) => `${d.yr}: ${d.med.toFixed(detailMedDecimals)} (n=${d.n})`)
+          .map((d) => `${d.yr}: ${formatHValue(d.med, detailMedDecimals)} (n=${d.n})`)
           .join(" · ")
+      : "";
+
+  const lowHWarning =
+    Number.isFinite(overall) && overall < 0.05
+      ? `<p style="margin:6px 0 0;font-size:0.72rem;color:#fbbf24;line-height:1.35">
+          ⚠ Very low H — meter actual is near zero vs PVLib expected while GHI is present.
+          Check meter outages / stuck readings (not a chart bug).
+        </p>`
       : "";
 
   return `<div style="margin-top:2px">
@@ -59,5 +74,6 @@ export function seasonChartFooter(res, opt = {}) {
     ${detail ? `<div style="margin-top:4px;padding:6px 8px;background:#1e293b;
       border:1px solid #334155;border-radius:6px;font-size:11px;color:#94a3b8;
       line-height:1.4">${detail}</div>` : ""}
+    ${lowHWarning}
   </div>`;
 }

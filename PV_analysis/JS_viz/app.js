@@ -14,6 +14,7 @@ import { renderLibraryPVLib } from "./tab_library_pvlib.js";
 import { renderSeasonPerf } from "./tab_season_perf.js";
 import { renderSeasonIrradiance } from "./tab_season_irradiance.js";
 import { renderMeterDegradation } from "./tab_degradation.js";
+import { renderAllMetersDegradation } from "./tab_all_meters_degradation.js";
 import { renderForecast } from "./tab_forecast.js";
 
 let state = {
@@ -353,6 +354,15 @@ function showTab(id) {
       dt,
       ctx,
     );
+  } else if (id === "alldegradation") {
+    const panel = document.getElementById("panel-alldegradation");
+    if (panel) {
+      panel.innerHTML = `<p style="color:#94a3b8;padding:2rem">Loading all meters…</p>`;
+      renderAllMetersDegradation(panel, df, dt).catch((e) => {
+        panel.innerHTML = `<p style="color:#f87171;padding:2rem">${e.message}</p>`;
+        console.error(e);
+      });
+    }
   } else if (id === "forecast") {
     renderForecast(
       document.getElementById("panel-forecast"),
