@@ -351,3 +351,91 @@ table.data-table th {
   background: #1e293b;
   color: #94a3b8;
 }
+
+/* Health monitor — hover popup on recovery/drop markers */
+.hm-event-popup {
+  position: fixed;
+  z-index: 10050;
+  width: 368px;
+  max-width: calc(100vw - 24px);
+  padding: 12px 14px 10px;
+  background: #0f172a;
+  border: 1px solid #475569;
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  pointer-events: auto;
+}
+
+.hm-event-popup__close {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: #1e293b;
+  color: #94a3b8;
+  font-size: 1.2rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.hm-event-popup__close:hover {
+  background: #334155;
+  color: #f8fafc;
+}
+
+.hm-event-popup__title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-left: 10px;
+  border-left: 3px solid #64748b;
+}
+
+.hm-event-popup__dir {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #f8fafc;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.hm-event-popup__cause {
+  font-size: 0.88rem;
+  color: #cbd5e1;
+}
+
+.hm-event-popup__meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 12px;
+  margin-bottom: 8px;
+  font-size: 0.8rem;
+  color: #e2e8f0;
+}
+
+.hm-event-popup__label {
+  display: block;
+  font-size: 0.68rem;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 1px;
+}
+
+.hm-event-popup__window {
+  font-size: 0.72rem;
+  color: #64748b;
+  margin-bottom: 6px;
+}
+
+.hm-event-popup__plot {
+  margin-top: 4px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #1e293b;
+}

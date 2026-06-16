@@ -34,6 +34,8 @@ const SOILING_MIN_SEGMENT_DAYS = 5; // min dry-spell length to fit a soiling slo
 const SMOOTH_WINDOW_DAYS = 3; // centered smoothing window for H before jump detection
 const SIGNIFICANT_JUMP_THRESHOLD = 0.12; // min |ΔH| shown on charts / key-events table
 const MIN_DAYS_BETWEEN_EVENTS = 7; // debounce nearby recovery markers
+const EVENT_POPUP_RADIUS_DAYS = 3; // ±3 days around marker → 7-day window in hover popup
+const EVENT_POPUP_CHART_WIDTH = 340;
 const MAX_CHART_RECOVERY_MARKERS = 35;
 const MAX_SOILING_LINES_ON_CHART = 8;
 
@@ -1075,6 +1077,381 @@ function wireLinkedXAxes(chartEls) {
   }
 }
 
+function dailyWindowAround(daily, centerDay, radiusDays = EVENT_POPUP_RADIUS_DAYS) {
+  const start = addDaysIso(centerDay, -radiusDays);
+  const end = addDaysIso(centerDay, radiusDays);
+  return daily.filter((d) => d.day >= start && d.day <= end);
+}
+
+function eventDayMarkerShape(eventDay, color) {
+  return {
+    type: "line",
+    x0: eventDay,
+    x1: eventDay,
+    y0: 0,
+    y1: 1,
+    yref: "paper",
+    line: { color, width: 2, dash: "dot" },
+  };
+}
+
+function eventPopupMetaHtml(event) {
+  const sign = event.jump >= 0 ? "+" : "";
+  const accent = event.direction === "Recovery" ? "#22c55e" : "#f87171";
+  const thirdLabel = event.direction === "Recovery" ? "Wind max" : "Temp";
+  const thirdValue =
+    event.direction === "Recovery"
+      ? Number.isFinite(event.windAmt)
+        ? `${event.windAmt.toFixed(2)} m/s`
+        : "—"
+      : Number.isFinite(event.tempMean)
+        ? `${event.tempMean.toFixed(1)} °C`
+        : "—";
+  return `
+    <div class="hm-event-popup__title" style="border-left-color:${accent}">
+      <span class="hm-event-popup__dir">${event.direction}</span>
+      <span class="hm-event-popup__cause">${event.cause}</span>
+    </div>
+    <div class="hm-event-popup__meta">
+      <div><span class="hm-event-popup__label">Date</span>${event.day}</div>
+      <div><span class="hm-event-popup__label">ΔH</span>${sign}${event.jump.toFixed(3)}</div>
+      <div><span class="hm-event-popup__label">Rain (3-day)</span>${event.rainAmt.toFixed(2)} mm</div>
+      <div><span class="hm-event-popup__label">${thirdLabel}</span>${thirdValue}</div>
+    </div>
+    <div class="hm-event-popup__window">7-day window · ${addDaysIso(event.day, -EVENT_POPUP_RADIUS_DAYS)} → ${addDaysIso(event.day, EVENT_POPUP_RADIUS_DAYS)}</div>`;
+}
+
+function buildMiniHChartSpec(windowDaily, event, width) {
+  const days = windowDaily.map((d) => d.day);
+  const theme = plotlyDarkTheme();
+  const markerColor = event.direction === "Recovery" ? "#22c55e" : "#f87171";
+  const eventPoint = windowDaily.find((d) => d.day === event.day);
+  const traces = [
+    {
+      x: days,
+      y: windowDaily.map((d) => d.H),
+      type: "scatter",
+      mode: "lines",
+      name: "Daily H",
+      line: { color: "#22c55e", width: 1 },
+      opacity: 0.45,
+      hovertemplate: "%{x}<br>H = %{y:.3f}<extra></extra>",
+    },
+    {
+      x: days,
+      y: windowDaily.map((d) => d.Hsmooth),
+      type: "scatter",
+      mode: "lines+markers",
+      name: "Smoothed H",
+      line: { color: "#e2e8f0", width: 2 },
+      marker: { size: 5, color: "#e2e8f0" },
+      hovertemplate: "%{x}<br>Smoothed H = %{y:.3f}<extra></extra>",
+    },
+  ];
+  if (eventPoint && Number.isFinite(eventPoint.Hsmooth)) {
+    traces.push({
+      x: [event.day],
+      y: [eventPoint.Hsmooth],
+      type: "scatter",
+      mode: "markers",
+      name: event.direction,
+      marker: {
+        size: 11,
+        symbol: event.direction === "Recovery" ? "triangle-up" : "triangle-down",
+        color: markerColor,
+        line: { width: 1, color: "#0f172a" },
+      },
+      hoverinfo: "skip",
+    });
+  }
+  return {
+    traces,
+    layout: {
+      ...theme,
+      autosize: false,
+      width,
+      height: 130,
+      margin: { t: 28, r: 12, b: 32, l: 44 },
+      title: {
+        text: "Health ratio (H)",
+        font: { color: "#cbd5e1", size: 11 },
+      },
+      xaxis: { ...theme.xaxis, type: "date", tickformat: "%d %b" },
+      yaxis: { ...theme.yaxis, title: { text: "H", font: { size: 10 } } },
+      shapes: [eventDayMarkerShape(event.day, markerColor)],
+      showlegend: false,
+      hovermode: "x unified",
+    },
+  };
+}
+
+function buildMiniRainChartSpec(windowDaily, event, width) {
+  const days = windowDaily.map((d) => d.day);
+  const theme = plotlyDarkTheme();
+  const markerColor = event.direction === "Recovery" ? "#22c55e" : "#f87171";
+  return {
+    traces: [
+      {
+        x: days,
+        y: windowDaily.map((d) => d.rain),
+        type: "bar",
+        name: "Rain",
+        marker: { color: "#3b82f6" },
+        hovertemplate: "%{x}<br>Rain = %{y:.2f} mm<extra></extra>",
+      },
+      {
+        x: [days[0], days[days.length - 1]],
+        y: [RAIN_CLEAN_THRESHOLD, RAIN_CLEAN_THRESHOLD],
+        type: "scatter",
+        mode: "lines",
+        line: { color: "#f87171", width: 1, dash: "dash" },
+        hoverinfo: "skip",
+      },
+    ],
+    layout: {
+      ...theme,
+      autosize: false,
+      width,
+      height: 120,
+      margin: { t: 28, r: 12, b: 32, l: 44 },
+      title: {
+        text: "Daily rainfall",
+        font: { color: "#cbd5e1", size: 11 },
+      },
+      xaxis: { ...theme.xaxis, type: "date", tickformat: "%d %b" },
+      yaxis: { ...theme.yaxis, title: { text: "mm", font: { size: 10 } } },
+      shapes: [eventDayMarkerShape(event.day, markerColor)],
+      bargap: 0.2,
+      showlegend: false,
+      hovermode: "x unified",
+    },
+  };
+}
+
+let _eventPopupEl = null;
+let _eventPopupHideTimer = null;
+let _eventPopupPinned = false;
+let _eventPopupPlotEl = null;
+
+function hoverDayFromPlotlyEvent(ev) {
+  const pt = ev.points?.[0];
+  if (!pt) return null;
+  const raw = pt.x;
+  if (typeof raw === "string") return raw.slice(0, 10);
+  try {
+    return new Date(raw).toISOString().slice(0, 10);
+  } catch {
+    return null;
+  }
+}
+
+function setPlotlyNativeHoverVisible(plotEl, visible) {
+  if (!plotEl) return;
+  plotEl.querySelectorAll(".hoverlayer").forEach((el) => {
+    el.style.visibility = visible ? "visible" : "hidden";
+  });
+}
+
+function pointerFromPlotlyEvent(ev) {
+  const mouse = ev?.event || {};
+  const clientX = Number.isFinite(mouse.clientX)
+    ? mouse.clientX
+    : Number.isFinite(mouse.pageX)
+      ? mouse.pageX
+      : window.innerWidth / 2;
+  const clientY = Number.isFinite(mouse.clientY)
+    ? mouse.clientY
+    : Number.isFinite(mouse.pageY)
+      ? mouse.pageY
+      : window.innerHeight / 2;
+  return { clientX, clientY };
+}
+
+function removeEventHoverPopup() {
+  if (_eventPopupHideTimer) {
+    clearTimeout(_eventPopupHideTimer);
+    _eventPopupHideTimer = null;
+  }
+  _eventPopupPinned = false;
+  if (_eventPopupPlotEl) {
+    setPlotlyNativeHoverVisible(_eventPopupPlotEl, true);
+    _eventPopupPlotEl = null;
+  }
+  if (!_eventPopupEl) return;
+  const h = _eventPopupEl.querySelector(".hm-event-popup__plot--h");
+  const rain = _eventPopupEl.querySelector(".hm-event-popup__plot--rain");
+  if (h && h.data) Plotly.purge(h);
+  if (rain && rain.data) Plotly.purge(rain);
+  _eventPopupEl.remove();
+  _eventPopupEl = null;
+}
+
+function getOrCreateEventHoverPopup() {
+  if (_eventPopupEl) return _eventPopupEl;
+  const el = document.createElement("div");
+  el.id = "hm-event-hover-popup";
+  el.className = "hm-event-popup";
+  el.innerHTML = `
+    <button type="button" class="hm-event-popup__close" aria-label="Close">×</button>
+    <div class="hm-event-popup__header"></div>
+    <div class="hm-event-popup__plot hm-event-popup__plot--h"></div>
+    <div class="hm-event-popup__plot hm-event-popup__plot--rain"></div>`;
+  el.style.display = "none";
+  document.body.appendChild(el);
+
+  el.querySelector(".hm-event-popup__close")?.addEventListener("click", () => {
+    _eventPopupPinned = false;
+    el.style.display = "none";
+    if (_eventPopupPlotEl) setPlotlyNativeHoverVisible(_eventPopupPlotEl, true);
+  });
+
+  el.addEventListener("mouseenter", () => {
+    if (_eventPopupHideTimer) {
+      clearTimeout(_eventPopupHideTimer);
+      _eventPopupHideTimer = null;
+    }
+    _eventPopupPinned = true;
+  });
+  el.addEventListener("mouseleave", () => {
+    _eventPopupPinned = false;
+    _eventPopupHideTimer = setTimeout(() => {
+      if (!_eventPopupPinned) el.style.display = "none";
+      if (_eventPopupPlotEl) setPlotlyNativeHoverVisible(_eventPopupPlotEl, true);
+    }, 280);
+  });
+
+  _eventPopupEl = el;
+  return el;
+}
+
+function positionEventHoverPopup(popup, clientX, clientY) {
+  popup.style.display = "block";
+  popup.style.visibility = "hidden";
+  const rect = popup.getBoundingClientRect();
+  const pad = 14;
+  let left = clientX + pad;
+  let top = clientY + pad;
+  if (left + rect.width > window.innerWidth - pad) {
+    left = Math.max(pad, clientX - rect.width - pad);
+  }
+  if (top + rect.height > window.innerHeight - pad) {
+    top = Math.max(pad, clientY - rect.height - pad);
+  }
+  popup.style.left = `${left}px`;
+  popup.style.top = `${top}px`;
+  popup.style.visibility = "visible";
+}
+
+async function showEventHoverPopup(popup, event, daily, clientX, clientY, plotEl) {
+  if (_eventPopupHideTimer) {
+    clearTimeout(_eventPopupHideTimer);
+    _eventPopupHideTimer = null;
+  }
+
+  const header = popup.querySelector(".hm-event-popup__header");
+  const elH = popup.querySelector(".hm-event-popup__plot--h");
+  const elRain = popup.querySelector(".hm-event-popup__plot--rain");
+  if (!header || !elH || !elRain) return;
+
+  _eventPopupPlotEl = plotEl || _eventPopupPlotEl;
+  if (_eventPopupPlotEl) setPlotlyNativeHoverVisible(_eventPopupPlotEl, false);
+
+  header.innerHTML = eventPopupMetaHtml(event);
+  popup.style.display = "block";
+  popup.style.visibility = "visible";
+  popup.style.left = "0px";
+  popup.style.top = "0px";
+
+  const windowDaily = dailyWindowAround(daily, event.day);
+  const w = EVENT_POPUP_CHART_WIDTH;
+  const hSpec = buildMiniHChartSpec(windowDaily, event, w);
+  const rainSpec = buildMiniRainChartSpec(windowDaily, event, w);
+
+  try {
+    if (elH.data) {
+      await Plotly.react(elH, hSpec.traces, hSpec.layout, PLOTLY_STATIC);
+      await Plotly.react(elRain, rainSpec.traces, rainSpec.layout, PLOTLY_STATIC);
+    } else {
+      await Plotly.newPlot(elH, hSpec.traces, hSpec.layout, PLOTLY_STATIC);
+      await Plotly.newPlot(elRain, rainSpec.traces, rainSpec.layout, PLOTLY_STATIC);
+    }
+  } catch (err) {
+    console.error("[HealthMonitor] event popup chart error", err);
+  }
+
+  positionEventHoverPopup(popup, clientX, clientY);
+}
+
+async function openEventDetailPopup(plotEl, weather, event, ev) {
+  if (!event) return;
+  const popup = getOrCreateEventHoverPopup();
+  const { clientX, clientY } = pointerFromPlotlyEvent(ev);
+  _eventPopupPinned = true;
+  await showEventHoverPopup(popup, event, weather.daily, clientX, clientY, plotEl);
+}
+
+function scheduleHideEventHoverPopup() {
+  if (_eventPopupPinned) return;
+  if (_eventPopupHideTimer) clearTimeout(_eventPopupHideTimer);
+  _eventPopupHideTimer = setTimeout(() => {
+    if (_eventPopupPinned || !_eventPopupEl) return;
+    if (_eventPopupEl.matches(":hover")) return;
+    _eventPopupEl.style.display = "none";
+    if (_eventPopupPlotEl) setPlotlyNativeHoverVisible(_eventPopupPlotEl, true);
+  }, 280);
+}
+
+function eventFromPlotlyPoint(ev, weather) {
+  const markerPt = ev.points?.find(
+    (pt) => pt.data?.name === "Recovery" || pt.data?.name === "Drop",
+  );
+  if (markerPt) {
+    const day = String(markerPt.x).slice(0, 10);
+    return weather.significantEvents.find(
+      (e) => e.day === day && e.direction === markerPt.data.name,
+    );
+  }
+  const day = hoverDayFromPlotlyEvent(ev);
+  if (!day) return null;
+  return weather.significantEvents.find((e) => e.day === day) || null;
+}
+
+function wireSignificantEventHover(plotEl, weather) {
+  if (!plotEl || !weather?.significantEvents?.length) return;
+
+  plotEl.on("plotly_hover", (ev) => {
+    const event = eventFromPlotlyPoint(ev, weather);
+    if (!event) {
+      if (!_eventPopupPinned) {
+        setPlotlyNativeHoverVisible(plotEl, true);
+        scheduleHideEventHoverPopup();
+      }
+      return;
+    }
+    void openEventDetailPopup(plotEl, weather, event, ev);
+  });
+
+  plotEl.on("plotly_unhover", () => {
+    if (!_eventPopupPinned) scheduleHideEventHoverPopup();
+  });
+
+  plotEl.on("plotly_click", (ev) => {
+    const pt = ev.points?.[0];
+    const name = pt?.data?.name;
+    let event = null;
+    if (name === "Recovery" || name === "Drop") {
+      const day = String(pt.x).slice(0, 10);
+      event = weather.significantEvents.find(
+        (e) => e.day === day && e.direction === name,
+      );
+    } else {
+      event = eventFromPlotlyPoint(ev, weather);
+    }
+    if (!event) return;
+    void openEventDetailPopup(plotEl, weather, event, ev);
+  });
+}
+
 function buildSoilingHChart(weather, width) {
   const { daily, significantEvents, chartSegments } = weather;
   const days = daily.map((d) => d.day);
@@ -1130,16 +1507,12 @@ function buildSoilingHChart(weather, width) {
         mode: "markers",
         name: "Recovery",
         marker: {
-          size: 9,
+          size: 11,
           symbol: "triangle-up",
           color: recoveries.map((e) => e.color),
           line: { width: 1, color: "#0f172a" },
         },
-        customdata: recoveries.map(
-          (e) =>
-            `${e.cause}<br>ΔH = +${e.jump.toFixed(3)}<br>Rain: ${e.rainAmt.toFixed(2)} mm<br>Wind: ${Number.isFinite(e.windAmt) ? e.windAmt.toFixed(2) : "—"} m/s`,
-        ),
-        hovertemplate: "%{x}<br>%{customdata}<extra></extra>",
+        hoverinfo: "none",
       });
     }
     if (drops.length) {
@@ -1150,16 +1523,12 @@ function buildSoilingHChart(weather, width) {
         mode: "markers",
         name: "Drop",
         marker: {
-          size: 9,
+          size: 11,
           symbol: "triangle-down",
           color: drops.map((e) => e.color),
           line: { width: 1, color: "#0f172a" },
         },
-        customdata: drops.map(
-          (e) =>
-            `${e.cause}<br>ΔH = ${e.jump.toFixed(3)}<br>Rain: ${e.rainAmt.toFixed(2)} mm<br>Temp: ${Number.isFinite(e.tempMean) ? e.tempMean.toFixed(1) : "—"} °C`,
-        ),
-        hovertemplate: "%{x}<br>%{customdata}<extra></extra>",
+        hoverinfo: "none",
       });
     }
   }
@@ -1182,7 +1551,7 @@ function buildSoilingHChart(weather, width) {
         title: "H",
         range: [hMin - yPad, hMax + yPad * 1.2],
       },
-      hovermode: "x unified",
+      hovermode: "closest",
       legend: { orientation: "h", y: 1.12, x: 0, font: { size: 10 } },
     },
   };
@@ -1348,6 +1717,7 @@ function plotWeatherPanels(weather, ids, width, windAvailable) {
 
   const hSpec = buildSoilingHChart(weather, width);
   Plotly.newPlot(elH, hSpec.traces, hSpec.layout, PLOTLY_STATIC);
+  wireSignificantEventHover(elH, weather);
   const rainSpec = buildRainChart(weather, width);
   Plotly.newPlot(elRain, rainSpec.traces, rainSpec.layout, PLOTLY_STATIC);
   const tempSpec = buildTempChart(weather, width);
@@ -1598,6 +1968,7 @@ function alarmTableHtml(events) {
  */
 export function renderHealthMonitor(container, hourly, site = {}) {
   purgePlotlyInContainer(container);
+  removeEventHoverPopup();
 
   if (!hourly?.length) {
     container.innerHTML =
@@ -1654,7 +2025,8 @@ export function renderHealthMonitor(container, hourly, site = {}) {
 
       <h3 style="font-size:0.92rem;color:#cbd5e1;margin:24px 0 0">Weather &amp; performance analysis</h3>
       ${soilingHowItWorksHtml()}
-      <p class="note" style="margin:8px 0 12px">Linked panels — pan/zoom any chart to align H changes with rain, wind, temperature, and solar resource.</p>
+      <p class="note" style="margin:8px 0 12px">Linked panels — pan/zoom any chart to align H changes with rain, wind, temperature, and solar resource.
+        Hover or click a ▲/▼ marker on the H chart for a 7-day rain + H detail popup.</p>
       <div id="${idSoilH}" class="chart-box" style="height:340px;min-height:340px;margin-bottom:4px;width:100%;overflow:hidden"></div>
       <div id="${idSoilRain}" class="chart-box" style="height:170px;min-height:170px;margin-bottom:4px;width:100%;overflow:hidden"></div>
       <div id="${idSoilWind}" class="chart-box" style="height:170px;min-height:170px;margin-bottom:4px;width:100%;overflow:hidden"></div>
