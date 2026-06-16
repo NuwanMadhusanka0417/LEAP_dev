@@ -140,6 +140,7 @@ export function renderMeterDegradation(container, hourly, dateFrom, dateTo, site
     <h2>${siteHeading("Meter degradation (performance vs PVLib)", site)}</h2>
     <p class="note">
       <strong>Annual aggregation</strong> smooths most weather and seasonal swing.
+      Uses the <strong>full meter history</strong> (header date filter does not apply to this tab).
       <strong>Linear regression on annual H</strong> summarises long-run trend;
       <strong>H = Σ actual ÷ Σ PVLib expected</strong> (daylight, <strong>GHI &gt; 5 W/m²</strong>) keeps each year
       weather-normalised vs raw kWh-only trends. Partial calendar years in your date filter still count as one
@@ -191,7 +192,7 @@ export function renderMeterDegradation(container, hourly, dateFrom, dateTo, site
       </table>
     </div>
     <p style="font-size:0.76rem;color:#64748b;margin-top:10px">
-      Window: <strong>${dateFrom}</strong> → <strong>${dateTo}</strong> ·
+      Window: <strong>${dateFrom}</strong> → <strong>${dateTo}</strong> (full range) ·
       Negative slope / %/yr ⇒ H trending down (possible degradation); cross-check with O&amp;M and multi-year span.
     </p>
   `;

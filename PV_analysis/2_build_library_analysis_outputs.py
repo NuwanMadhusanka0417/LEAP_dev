@@ -28,6 +28,33 @@ import pandas as pd
 
 import config
 
+# Solcast columns merged onto hourly master for dashboard weather/soiling panels.
+WEATHER_MERGE_COLS = (
+    "precipitation_rate",
+    "wind_speed_10m",
+    "wind_speed_100m",
+    "air_temp",
+    "cloud_opacity",
+)
+
+
+def _merge_weather_columns(
+    merged: pd.DataFrame, weather_df: pd.DataFrame | None
+) -> pd.DataFrame:
+    """Attach Solcast rain/wind/cloud columns needed by the health-monitor tab."""
+    if weather_df is None or weather_df.empty:
+        return merged
+    cols = [c for c in WEATHER_MERGE_COLS if c in weather_df.columns]
+    if not cols:
+        return merged
+    w = weather_df[["timestamp"] + cols].copy()
+    w["timestamp"] = pd.to_datetime(w["timestamp"]).dt.floor("h")
+    w = w.drop_duplicates(subset=["timestamp"], keep="first")
+    out = merged.merge(w, on="timestamp", how="left")
+    if "precipitation_rate" in out.columns and "rain_mm" not in out.columns:
+        out["rain_mm"] = out["precipitation_rate"]
+    return out
+
 
 def _load_precomputed_expected(path: str) -> pd.DataFrame:
     df = pd.read_csv(path, parse_dates=["timestamp"])
@@ -170,7 +197,11 @@ def process_building(
     )
 
     merged = meter.merge(pvlib_hourly, on="timestamp", how="left")
+    merged = _merge_weather_columns(merged, weather_df)
     n_exp = int(merged["expected_kwh"].notna().sum())
+    wx_cols = [c for c in WEATHER_MERGE_COLS if c in merged.columns]
+    if wx_cols:
+        print(f"  Weather columns merged: {', '.join(wx_cols)}")
     print(f"  Merge: {n_exp} / {len(merged)} rows with expected_kwh")
 
     merged["building_key"] = key
@@ -323,11 +354,12 @@ def main() -> None:
     need_live = args.compute_pvlib or not args.precomputed
     if args.expected_csv:
         need_live = args.compute_pvlib
-    if need_live or any(
+    need_weather = need_live or any(
         args.compute_pvlib
         or not os.path.isfile(_precomputed_path_for_key(k))
         for k in keys
-    ):
+    )
+    if need_weather or os.path.isfile(args.weather_csv):
         if not os.path.isfile(args.weather_csv):
             print(f"ERROR: Weather file not found: {args.weather_csv}")
             sys.exit(1)

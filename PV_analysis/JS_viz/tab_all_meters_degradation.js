@@ -128,6 +128,7 @@ function plotHorizontalBars(el, labels, values, xTitle, plotWidth) {
  */
 export async function renderAllMetersDegradation(container, dateFrom, dateTo) {
   purgePlotlyInContainer(container);
+  const gen = (container.__allDegGen = (container.__allDegGen || 0) + 1);
 
   const idYearly = nextPlotDomId("alldeg-yearly");
   const idMonthly = nextPlotDomId("alldeg-monthly");
@@ -145,6 +146,7 @@ export async function renderAllMetersDegradation(container, dateFrom, dateTo) {
     </p>
     <p style="font-size:0.78rem;color:#64748b;margin:0 0 16px">
       Window: <strong>${dateFrom}</strong> → <strong>${dateTo}</strong>
+      <span style="color:#475569"> (full meter history — not affected by header date filter)</span>
     </p>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px 18px;align-items:start">
       <div style="${seasonCellFrameStyle(FRAME_YEARLY)}">
@@ -194,6 +196,8 @@ export async function renderAllMetersDegradation(container, dateFrom, dateTo) {
 
   results.sort((a, b) => a.label.localeCompare(b.label));
 
+  if (container.__allDegGen !== gen || !container.isConnected) return;
+
   const tableEl = document.getElementById(idTable);
   if (tableEl) {
     tableEl.innerHTML = `
@@ -238,6 +242,7 @@ export async function renderAllMetersDegradation(container, dateFrom, dateTo) {
   }
 
   runAfterTabLayout(container, () => {
+    if (container.__allDegGen !== gen) return;
     void container.offsetWidth;
     const plotW = seasonChartPlotWidth(container.clientWidth);
 

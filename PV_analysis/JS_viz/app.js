@@ -15,6 +15,7 @@ import { renderSeasonPerf } from "./tab_season_perf.js";
 import { renderSeasonIrradiance } from "./tab_season_irradiance.js";
 import { renderMeterDegradation } from "./tab_degradation.js";
 import { renderAllMetersDegradation } from "./tab_all_meters_degradation.js";
+import { renderHealthMonitor } from "./tab_health_monitor.js";
 import { renderForecast } from "./tab_forecast.js";
 
 let state = {
@@ -74,6 +75,10 @@ function normalizeHourly(rows) {
       legRaw !== undefined && legRaw !== "" && String(legRaw).trim() !== ""
         ? Number(legRaw)
         : NaN;
+    const rainRaw = r.rain_mm ?? r.precipitation_mm ?? r.precipitation_rate;
+    const tempRaw = r.temp_c ?? r.temp_cell_c ?? r.air_temp;
+    const rain = Number(rainRaw);
+    const temp = Number(tempRaw);
     out.push({
       ts,
       tsStr: r.timestamp.trim(),
@@ -82,6 +87,9 @@ function normalizeHourly(rows) {
       expected: Number(r.expected_kwh),
       ghi: Number(r.ghi_wm2),
       legacy: Number.isFinite(legacy) ? legacy : NaN,
+      rain_mm: Number.isFinite(rain) ? rain : NaN,
+      temp_c: Number.isFinite(temp) ? temp : NaN,
+      temp_cell_c: Number.isFinite(temp) ? temp : NaN,
     });
   }
   return out.sort((a, b) => a.ts - b.ts);
@@ -303,6 +311,9 @@ function showTab(id) {
 
   const df = state.dateFrom;
   const dt = state.dateTo;
+  /** Degradation tabs always use the full meter history (ignore header date filter). */
+  const fullFrom = state.dataMin;
+  const fullTo = state.dataMax;
   const ctx = siteCtx();
   const rangeCtx = {
     dateFrom: df,
@@ -350,19 +361,25 @@ function showTab(id) {
     renderMeterDegradation(
       document.getElementById("panel-degradation"),
       state.hourly,
-      df,
-      dt,
+      fullFrom,
+      fullTo,
       ctx,
     );
   } else if (id === "alldegradation") {
     const panel = document.getElementById("panel-alldegradation");
     if (panel) {
       panel.innerHTML = `<p style="color:#94a3b8;padding:2rem">Loading all meters…</p>`;
-      renderAllMetersDegradation(panel, df, dt).catch((e) => {
+      renderAllMetersDegradation(panel, fullFrom, fullTo).catch((e) => {
         panel.innerHTML = `<p style="color:#f87171;padding:2rem">${e.message}</p>`;
         console.error(e);
       });
     }
+  } else if (id === "health") {
+    renderHealthMonitor(
+      document.getElementById("panel-health"),
+      state.hourly,
+      ctx,
+    );
   } else if (id === "forecast") {
     renderForecast(
       document.getElementById("panel-forecast"),

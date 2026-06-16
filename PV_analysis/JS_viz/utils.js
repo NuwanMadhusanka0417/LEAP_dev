@@ -175,6 +175,42 @@ export async function tryFetchPvlibFile(relPath) {
   return null;
 }
 
+/** Bases for PV_analysis/data_cleaned (Solcast weather CSVs). */
+export function getCandidateCleanedBases() {
+  const bases = [];
+  const seen = new Set();
+  const add = (u) => {
+    const key = u.href.replace(/\/+$/, "");
+    if (seen.has(key)) return;
+    seen.add(key);
+    bases.push(u);
+  };
+  const path = window.location.pathname;
+  const m = path.match(/^(.*?)\/JS_viz(?:\/|$)/);
+  if (m) {
+    const prefix = m[1] || "";
+    const pathPart = `${prefix}/data_cleaned/`.replace(/\/{2,}/g, "/");
+    add(new URL(pathPart, window.location.origin));
+  }
+  add(new URL("../data_cleaned/", window.location.href));
+  return bases;
+}
+
+/** Try to load a file from data_cleaned (e.g. solcast_df_cleaned_2020_2025.csv). */
+export async function tryFetchCleanedFile(relPath) {
+  const name = relPath.replace(/^\//, "");
+  for (const base of getCandidateCleanedBases()) {
+    const url = new URL(name, base);
+    try {
+      const resp = await fetch(url.href);
+      if (resp.ok) return { text: await resp.text(), url: url.href };
+    } catch {
+      /* try next base */
+    }
+  }
+  return null;
+}
+
 /** @deprecated use getCandidateDataBases()[0] or fetchDataVizFile */
 export function getDataBase() {
   const bases = getCandidateDataBases();

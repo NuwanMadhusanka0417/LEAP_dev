@@ -9,39 +9,25 @@ body {
   min-height: 100vh;
 }
 .header {
-  background: #1e293b;
-  padding: 14px 20px;
-  border-bottom: 1px solid #334155;
-}
-.header h1 {
-  margin: 0 0 4px 0;
-  font-size: 1.2rem;
-  font-weight: 600;
-  color: #f8fafc;
-}
-.header .hint {
-  font-size: 0.78rem;
-  color: #94a3b8;
-  margin-top: 6px;
-  max-width: 900px;
-  line-height: 1.4;
+  background: #52525b;
+  padding: 10px 20px;
+  border-bottom: 1px solid #3f3f46;
 }
 .controls {
   display: flex;
   flex-wrap: wrap;
   gap: 10px 16px;
   align-items: center;
-  margin-top: 12px;
 }
 .controls label {
   font-size: 0.8rem;
-  color: #94a3b8;
+  color: #e4e4e7;
 }
 .controls input[type="date"],
 .controls select.meter-select {
-  background: #0f172a;
-  border: 1px solid #475569;
-  color: #e2e8f0;
+  background: #27272a;
+  border: 1px solid #71717a;
+  color: #fafafa;
   padding: 6px 10px;
   border-radius: 6px;
   font-size: 0.85rem;
@@ -75,11 +61,123 @@ body {
 .tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  padding: 10px 16px;
-  background: #1e293b;
+  align-items: flex-end;
+  gap: 10px 12px;
+  padding: 12px 16px 10px;
+  background: #0f172a;
   border-bottom: 1px solid #334155;
 }
+
+.tab-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 10px 8px;
+  border-radius: 10px;
+  border: 1px solid #475569;
+  border-left-width: 5px;
+  background: #1e293b;
+  min-width: 0;
+}
+
+.tab-group__label {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #94a3b8;
+  padding: 2px 8px;
+  border-radius: 4px;
+  line-height: 1.2;
+  width: fit-content;
+}
+
+.tab-group__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.tab-group--daily {
+  border-left-color: #3b82f6;
+  border-color: #2563eb;
+  background: linear-gradient(135deg, #172554 0%, #1e293b 60%);
+}
+.tab-group--daily .tab-group__label {
+  color: #bfdbfe;
+  background: rgba(37, 99, 235, 0.4);
+}
+.tab-group--daily button.active,
+.tab-group--daily button.active:hover {
+  background: #2563eb;
+  color: #fff;
+  box-shadow: 0 0 0 1px #60a5fa;
+}
+
+.tab-group--season {
+  border-left-color: #f59e0b;
+  border-color: #d97706;
+  background: linear-gradient(135deg, #451a03 0%, #1e293b 60%);
+}
+.tab-group--season .tab-group__label {
+  color: #fde68a;
+  background: rgba(217, 119, 6, 0.4);
+}
+.tab-group--season button.active,
+.tab-group--season button.active:hover {
+  background: #d97706;
+  color: #fff;
+  box-shadow: 0 0 0 1px #fbbf24;
+}
+
+.tab-group--degradation {
+  border-left-color: #a78bfa;
+  border-color: #7c3aed;
+  background: linear-gradient(135deg, #2e1065 0%, #1e293b 60%);
+}
+.tab-group--degradation .tab-group__label {
+  color: #ddd6fe;
+  background: rgba(124, 58, 237, 0.4);
+}
+.tab-group--degradation button.active,
+.tab-group--degradation button.active:hover {
+  background: #7c3aed;
+  color: #fff;
+  box-shadow: 0 0 0 1px #a78bfa;
+}
+
+.tab-group--health {
+  border-left-color: #2dd4bf;
+  border-color: #0d9488;
+  background: linear-gradient(135deg, #042f2e 0%, #1e293b 60%);
+}
+.tab-group--health .tab-group__label {
+  color: #99f6e4;
+  background: rgba(13, 148, 136, 0.4);
+}
+.tab-group--health button.active,
+.tab-group--health button.active:hover {
+  background: #0d9488;
+  color: #fff;
+  box-shadow: 0 0 0 1px #2dd4bf;
+}
+
+.tab-group--forecast {
+  border-left-color: #fb923c;
+  border-color: #ea580c;
+  background: linear-gradient(135deg, #431407 0%, #1e293b 60%);
+}
+.tab-group--forecast .tab-group__label {
+  color: #fed7aa;
+  background: rgba(234, 88, 12, 0.4);
+}
+.tab-group--forecast button.active,
+.tab-group--forecast button.active:hover {
+  background: #ea580c;
+  color: #fff;
+  box-shadow: 0 0 0 1px #fb923c;
+}
+
 .tabs button {
   background: #334155;
   color: #e2e8f0;
@@ -88,13 +186,16 @@ body {
   border-radius: 6px;
   font-size: 0.85rem;
   cursor: pointer;
+  transition: background 0.15s, color 0.15s;
 }
 .tabs button:hover {
   background: #475569;
 }
-.tabs button.active {
-  background: #3b82f6;
-  color: #fff;
+
+@media (max-width: 720px) {
+  .tab-group {
+    flex: 1 1 100%;
+  }
 }
 main {
   padding: 16px 20px 32px;
