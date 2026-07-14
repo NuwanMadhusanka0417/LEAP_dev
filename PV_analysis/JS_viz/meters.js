@@ -18,6 +18,29 @@ export function forecastCombinedFilename(meterKey) {
   return `forecast_7d_combined_${meterKey.trim().toLowerCase()}.csv`;
 }
 
+/** Bundoora HSU soiling hourly series (from ``0_download_data.py --soiling-only``). */
+export function hsuSoilingFilename() {
+  return "hsu_soiling_bundoora.csv";
+}
+
+/**
+ * Load HSU CSV from data_for_viz/ (preferred) or data_raw/ fallback.
+ * @returns {Promise<{text: string, url: string} | null>}
+ */
+export async function tryFetchHsuSoilingText() {
+  const viz = await tryFetchDataVizFile(hsuSoilingFilename());
+  if (viz) return viz;
+  const rawName = "hsu_soiling_output.csv";
+  const rawUrl = new URL(`../data_raw/${rawName}`, window.location.href);
+  try {
+    const resp = await fetch(rawUrl.href);
+    if (resp.ok) return { text: await resp.text(), url: rawUrl.href };
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
 /**
  * Load meter catalog from sites_kpis_summary.csv or DEFAULT_METERS.
  * @returns {Promise<Array<{key: string, label: string}>>}

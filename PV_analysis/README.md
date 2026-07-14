@@ -17,7 +17,7 @@ Copy `.env.example` → `.env` and fill in SQL + Azure credentials (do not commi
 | Script | What it does |
 |--------|----------------|
 | **`config.py`** | Paths, site defaults, meter keys, `panel_data.csv` mappings, and PVLib tilt/azimuth per building. |
-| **`0_download_data.py`** | Incrementally downloads SQL meter readings and Azure Solcast weather into `data_raw/`. |
+| **`0_download_data.py`** | Incrementally downloads SQL meter readings, Azure Solcast weather, and Bundoora HSU soiling (pvlib) into `data_raw/`; publishes `data_for_viz/hsu_soiling_bundoora.csv` for the Health Monitor tab. |
 | **`1_data_cleaning.py`** | Cleans meters (night zeros, stuck detection, imputation) and aligns Solcast into `data_cleaned/`. |
 | **`2_build_library_analysis_outputs.py`** | Builds per-meter dashboard CSVs (hourly master, daily metrics, KPIs) in `data_for_viz/`. |
 | **`3_expected_power_pvlib.py`** | Computes PVLib expected kWh from Solcast weather — **called automatically** by steps 2 and 4; run manually only for debugging. |

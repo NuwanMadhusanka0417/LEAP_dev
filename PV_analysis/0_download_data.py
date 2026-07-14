@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-Incremental download of meter readings (SQL Server) and Solcast weather (Azure blobs).
+Incremental download of meter readings (SQL Server), Solcast weather (Azure blobs),
+and HSU soiling (Open-Meteo air quality + pvlib).
 
 Meters: append only rows newer than the last timestamp per meter.
 Weather: re-fetch from Azure for the last ``SOLCAST_REFRESH_DAYS`` (14) before the
 file's last timestamp per campus, plus any newer hours — live values replace stale forecast rows.
+HSU soiling: PM2.5/PM10 from Open-Meteo CAMS aligned to merged Solcast rain (BUNDOORA).
+Writes ``data_raw/hsu_soiling_output.csv`` and publishes ``data_for_viz/hsu_soiling_bundoora.csv``.
+PM values are converted µg/m³ → g/m³ before pvlib.soiling.hsu.
 
 Credentials: copy ``.env.example`` → ``.env`` in this folder (auto-loaded), or export env vars.
 
@@ -12,6 +16,8 @@ Usage (from PV_analysis/)::
   python 0_download_data.py
   python 0_download_data.py --weather-only
   python 0_download_data.py --meters-only
+  python 0_download_data.py --soiling-only
+  python 0_download_data.py --no-soiling
   python 0_download_data.py --campus BUNDOORA
 """
 from __future__ import annotations
@@ -32,9 +38,24 @@ import config
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA_RAW_DIR = os.path.join(BASE, "data_raw")
 
-METER_RAW_PRIMARY = "SolarMeterReadings1hour_2020_2025.csv"
+METER_RAW_PRIMARY = "SolarMeterReadings1hour.csv"
+# Live/forecast rows appended by Azure download (often starts ~2024 when blobs began).
 SOLCAST_RAW_PRIMARY = "solcast_df_2020_2025.csv"
+# Static multi-year Solcast archive (typically 2020 → earlier cut-off); not updated by Step 0.
+SOLCAST_ARCHIVE = "solcast_df.csv"
+HSU_SOILING_RAW = "hsu_soiling_output.csv"
+HSU_DEFAULT_CAMPUS = "BUNDOORA"
 METER_OUTPUT_COLS = ("timestamp", "meter", "meter_reading")
+
+# Bundoora grid point for Open-Meteo air quality (matches Solcast BUNDOORA weather)
+HSU_AIR_QUALITY_LAT = -37.72
+HSU_AIR_QUALITY_LON = 145.05
+HSU_CLEANING_THRESHOLD_MM = 0.5
+# pvlib.soiling.hsu expects PM in g/m³; Open-Meteo returns µg/m³.
+PM_UGM3_TO_GM3 = 1e-6
+# Open-Meteo cams_global PM2.5/PM10 (Bundoora); earlier hours have timestamps but null PM values.
+OPENMETEO_CAMS_PM_START = pd.Timestamp("2022-08-04", tz="UTC")
+OPENMETEO_AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 
 DEFAULT_AZURE_ACCOUNT_URL = "https://leapdata.blob.core.windows.net"
 DEFAULT_AZURE_CONTAINER = "solar-forecasts-solcast"
@@ -57,6 +78,30 @@ def raw_meter_path() -> str:
 
 def raw_solcast_path() -> str:
     return os.path.join(DATA_RAW_DIR, SOLCAST_RAW_PRIMARY)
+
+
+def raw_solcast_archive_path() -> str:
+    return os.path.join(DATA_RAW_DIR, SOLCAST_ARCHIVE)
+
+
+def raw_hsu_soiling_path() -> str:
+    return os.path.join(DATA_RAW_DIR, HSU_SOILING_RAW)
+
+
+def hsu_soiling_viz_path() -> str:
+    os.makedirs(config.DATA_FOR_VIZ_DIR, exist_ok=True)
+    return os.path.join(config.DATA_FOR_VIZ_DIR, config.HSU_SOILING_VIZ_CSV)
+
+
+def publish_hsu_for_viz(raw_path: str) -> None:
+    """Copy canonical raw HSU CSV into data_for_viz/ for the JS dashboard."""
+    import shutil
+
+    if not os.path.isfile(raw_path):
+        return
+    viz_path = hsu_soiling_viz_path()
+    shutil.copy2(raw_path, viz_path)
+    print(f"  Published dashboard copy -> {viz_path}")
 
 
 def ensure_raw_dir() -> None:
@@ -457,10 +502,315 @@ def download_weather(*, out_path: str, campus_filter: str | None, dry_run: bool)
     return len(new_rows)
 
 
+def _as_utc(ts: pd.Timestamp) -> pd.Timestamp:
+    ts = pd.Timestamp(ts)
+    if ts.tzinfo is None:
+        return ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
+
+
+def hsu_surface_tilt_deg() -> float:
+    try:
+        return float(config.surface_geometry_for_meter_key("library")[0])
+    except Exception:
+        return float(config.SURFACE_TILT_DEG)
+
+
+def load_solcast_hourly_rainfall(path: str, *, campus: str | None = None) -> pd.Series:
+    """Hourly accumulated rainfall (mm) from Solcast precipitation_rate, UTC index."""
+    df = pd.read_csv(path)
+    if campus and "campus" in df.columns:
+        campus_u = campus.strip().upper()
+        df = df[df["campus"].astype(str).str.strip().str.upper() == campus_u]
+    if df.empty:
+        raise ValueError(f"No Solcast rows in {path}" + (f" for campus {campus}" if campus else ""))
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df = df.set_index("timestamp").sort_index()
+    step_hours = df.index.to_series().diff().dropna().median().total_seconds() / 3600.0
+    if not np.isfinite(step_hours) or step_hours <= 0:
+        step_hours = 0.5
+    df["rain_mm"] = df["precipitation_rate"].fillna(0.0) * step_hours
+    return df["rain_mm"].resample("1h").sum()
+
+
+def load_merged_solcast_hourly_rainfall(*, campus: str | None = None) -> pd.Series:
+    """Rain from archive ``solcast_df.csv`` (2020+) plus live ``solcast_df_2020_2025.csv``."""
+    parts: list[pd.Series] = []
+    archive = raw_solcast_archive_path()
+    live = raw_solcast_path()
+    if os.path.isfile(archive):
+        parts.append(load_solcast_hourly_rainfall(archive, campus=campus))
+        print(f"  Rain archive: {archive}  ({parts[-1].index.min()} → {parts[-1].index.max()})")
+    if os.path.isfile(live):
+        live_rain = load_solcast_hourly_rainfall(live, campus=campus)
+        parts.append(live_rain)
+        print(f"  Rain live file: {live}  ({live_rain.index.min()} → {live_rain.index.max()})")
+    if not parts:
+        raise FileNotFoundError(
+            f"No Solcast rain source in {DATA_RAW_DIR} "
+            f"(expected {SOLCAST_ARCHIVE} and/or {SOLCAST_RAW_PRIMARY})"
+        )
+    rain = pd.concat(parts).sort_index()
+    rain.index = pd.Index([_as_utc(t) for t in rain.index])
+    return rain[~rain.index.duplicated(keep="last")]
+
+
+def fetch_openmeteo_pm(
+    lat: float,
+    lon: float,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> pd.DataFrame:
+    """PM2.5 / PM10 (µg/m³) from Open-Meteo Air Quality API, hourly UTC."""
+    import requests
+
+    start = _as_utc(start)
+    end = _as_utc(end)
+    if start > end:
+        return pd.DataFrame(columns=["pm2_5", "pm10"])
+
+    frames: list[pd.DataFrame] = []
+    for yr in range(start.year, end.year + 1):
+        s = max(pd.Timestamp(f"{yr}-01-01", tz="UTC"), start)
+        e = min(pd.Timestamp(f"{yr}-12-31 23:00:00", tz="UTC"), end)
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "hourly": "pm2_5,pm10",
+            "start_date": s.strftime("%Y-%m-%d"),
+            "end_date": e.strftime("%Y-%m-%d"),
+            "timezone": "GMT",
+            "domains": "cams_global",
+        }
+        r = requests.get(OPENMETEO_AIR_QUALITY_URL, params=params, timeout=120)
+        r.raise_for_status()
+        h = r.json().get("hourly", {})
+        if not h.get("time"):
+            continue
+        chunk = pd.DataFrame(h)
+        chunk["time"] = pd.to_datetime(chunk["time"], utc=True)
+        chunk = chunk.set_index("time")
+        frames.append(chunk[["pm2_5", "pm10"]])
+        print(f"    PM {yr}: {len(chunk):,} hourly rows")
+
+    if not frames:
+        return pd.DataFrame(columns=["pm2_5", "pm10"])
+    pm = pd.concat(frames).sort_index()
+    return pm[~pm.index.duplicated(keep="first")]
+
+
+def extend_pm_with_climatology(
+    pm: pd.DataFrame,
+    full_index: pd.DatetimeIndex,
+) -> tuple[pd.DataFrame, int]:
+    """
+    Reindex PM to ``full_index`` and fill gaps with month-of-year × hour-of-day medians
+    from observed Open-Meteo CAMS rows (needed before ~Aug 2022 when PM is unavailable).
+    """
+    out = pm.reindex(full_index)
+    obs = out.dropna(subset=["pm2_5", "pm10"])
+    if obs.empty:
+        return out, 0
+
+    missing = out["pm2_5"].isna()
+    n_missing = int(missing.sum())
+    if n_missing == 0:
+        return out, 0
+
+    cal = obs.copy()
+    cal["_month"] = cal.index.month
+    cal["_hour"] = cal.index.hour
+    medians = cal.groupby(["_month", "_hour"], observed=True)[["pm2_5", "pm10"]].median()
+    global_med = obs[["pm2_5", "pm10"]].median()
+
+    miss_idx = out.index[missing]
+    lookup = pd.DataFrame({"_month": miss_idx.month, "_hour": miss_idx.hour}, index=miss_idx)
+    filled = lookup.join(medians, on=["_month", "_hour"])
+    out.loc[missing, "pm2_5"] = filled["pm2_5"].fillna(global_med["pm2_5"]).to_numpy()
+    out.loc[missing, "pm10"] = filled["pm10"].fillna(global_med["pm10"]).to_numpy()
+    return out, n_missing
+
+
+def load_existing_hsu_soiling(path: str) -> pd.DataFrame | None:
+    if not os.path.isfile(path):
+        return None
+    df = pd.read_csv(path, index_col=0, parse_dates=True)
+    if df.empty:
+        return None
+    df.index = pd.Index([_as_utc(t) for t in df.index], name=df.index.name)
+    return df.sort_index()
+
+
+def download_hsu_soiling(
+    *,
+    out_path: str,
+    campus_filter: str | None,
+    dry_run: bool,
+    pm_climatology: bool = True,
+) -> int:
+    """Incremental Open-Meteo PM fetch + full pvlib HSU recompute on aligned rain/PM."""
+    campus = (campus_filter or HSU_DEFAULT_CAMPUS).strip().upper()
+    try:
+        rain_h = load_merged_solcast_hourly_rainfall(campus=campus)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"  Skip HSU soiling: {e}")
+        return 0
+
+    try:
+        import pvlib
+    except ImportError as e:
+        raise SystemExit("HSU soiling requires pvlib: pip install pvlib") from e
+
+    period_start = _as_utc(rain_h.index.min())
+    period_end = min(_as_utc(pd.Timestamp.now(tz="UTC")).floor("h"), _as_utc(rain_h.index.max()))
+    print(
+        f"  Merged rain span ({campus}): {period_start} → {period_end}  "
+        f"(HSU through {period_end})"
+    )
+
+    existing = load_existing_hsu_soiling(out_path)
+    if existing is None:
+        legacy_path = os.path.join(BASE, HSU_SOILING_RAW)
+        if os.path.isfile(legacy_path):
+            existing = load_existing_hsu_soiling(legacy_path)
+            if existing is not None:
+                print(f"  Using legacy HSU file: {legacy_path} ({len(existing):,} rows)")
+
+    prev_len = len(existing) if existing is not None else 0
+    pm_parts: list[pd.DataFrame] = []
+
+    if existing is not None:
+        first_hsu = _as_utc(existing.index.min())
+        last_hsu = _as_utc(existing.index.max())
+        print(f"  Existing HSU file: {prev_len:,} rows  {first_hsu} → {last_hsu}")
+        if first_hsu > period_start:
+            backfill_end = first_hsu - pd.Timedelta(hours=1)
+            print(
+                f"  Backfilling PM before existing file: "
+                f"{period_start.date()} → {backfill_end.date()}"
+            )
+            if not dry_run:
+                pm_parts.append(
+                    fetch_openmeteo_pm(
+                        HSU_AIR_QUALITY_LAT,
+                        HSU_AIR_QUALITY_LON,
+                        period_start,
+                        backfill_end,
+                    )
+                )
+        pm_fetch_start = last_hsu + pd.Timedelta(hours=1)
+    else:
+        last_hsu = None
+        pm_fetch_start = period_start
+        print("  No existing HSU file — initial PM download from merged rain start")
+
+    pm_fetch_end = period_end
+    if pm_fetch_start <= pm_fetch_end:
+        print(
+            f"  Fetching air quality PM: {pm_fetch_start.date()} → {pm_fetch_end.date()}"
+        )
+        if not dry_run:
+            pm_parts.append(
+                fetch_openmeteo_pm(
+                    HSU_AIR_QUALITY_LAT,
+                    HSU_AIR_QUALITY_LON,
+                    pm_fetch_start,
+                    pm_fetch_end,
+                )
+            )
+        else:
+            print("  [dry-run] would fetch Open-Meteo PM")
+            return 0
+    elif existing is not None:
+        print(f"  PM already current through {last_hsu}")
+
+    if dry_run:
+        return 0
+
+    new_pm = pd.concat(pm_parts).sort_index() if pm_parts else pd.DataFrame(columns=["pm2_5", "pm10"])
+    if not new_pm.empty:
+        print(f"  Downloaded {len(new_pm):,} PM hourly rows")
+
+    if existing is not None and {"pm2_5", "pm10"}.issubset(existing.columns):
+        pm = pd.concat([existing[["pm2_5", "pm10"]], new_pm]).sort_index()
+    elif not new_pm.empty:
+        pm = new_pm
+    else:
+        pm = fetch_openmeteo_pm(
+            HSU_AIR_QUALITY_LAT,
+            HSU_AIR_QUALITY_LON,
+            period_start,
+            period_end,
+        )
+
+    pm = pm[~pm.index.duplicated(keep="last")]
+    if pm.empty:
+        print("  WARNING: no PM data available for HSU soiling.")
+        return 0
+
+    align_end = min(period_end, rain_h.index.max())
+    rain_slice = rain_h.loc[period_start:align_end]
+    if rain_slice.empty:
+        print("  WARNING: no Solcast rain rows in HSU period.")
+        return 0
+
+    if pm_climatology:
+        pm_aligned, n_clim = extend_pm_with_climatology(pm, rain_slice.index)
+        if n_clim:
+            print(
+                f"  PM climatology fill: {n_clim:,} hours before Open-Meteo CAMS "
+                f"(~{OPENMETEO_CAMS_PM_START.date()}) — rain-only deposition proxy"
+            )
+        df = pd.DataFrame({"rainfall": rain_slice}).join(pm_aligned, how="left")
+    else:
+        pm_aligned = pm.loc[period_start:align_end]
+        df = pd.DataFrame({"rainfall": rain_slice}).join(pm_aligned, how="inner")
+
+    if df.empty:
+        print("  WARNING: no overlapping rain + PM rows for HSU.")
+        return 0
+
+    df["pm2_5"] = df["pm2_5"].interpolate(limit=6)
+    df["pm10"] = df["pm10"].interpolate(limit=6)
+    df = df.dropna(subset=["pm2_5", "pm10"])
+    df["rainfall"] = df["rainfall"].fillna(0.0)
+
+    surface_tilt = hsu_surface_tilt_deg()
+    soiling_ratio = pvlib.soiling.hsu(
+        rainfall=df["rainfall"],
+        cleaning_threshold=HSU_CLEANING_THRESHOLD_MM,
+        surface_tilt=surface_tilt,
+        pm2_5=df["pm2_5"] * PM_UGM3_TO_GM3,
+        pm10=df["pm10"] * PM_UGM3_TO_GM3,
+        depo_veloc=None,
+        rain_accum_period=pd.Timedelta("1h"),
+    )
+
+    out = df.copy()
+    out["soiling_ratio"] = soiling_ratio
+    out["soiling_loss_pct"] = (1.0 - out["soiling_ratio"]) * 100.0
+    out.to_csv(out_path)
+    publish_hsu_for_viz(out_path)
+
+    added = len(out) - prev_len
+    daily = out["soiling_ratio"].resample("1D").mean()
+    print(
+        f"  Wrote {out_path} ({len(out):,} rows, +{max(added, 0):,} vs prior)  "
+        f"tilt={surface_tilt}°  mean SR={out['soiling_ratio'].mean():.4f}"
+    )
+    if not daily.empty:
+        print(f"  Worst daily SR: {daily.min():.4f} on {daily.idxmin().date()}")
+    return max(added, 0)
+
+
 def parse_args():
-    ap = argparse.ArgumentParser(description="Incremental download: SQL meters + Azure Solcast.")
+    ap = argparse.ArgumentParser(
+        description="Incremental download: SQL meters + Azure Solcast + HSU soiling."
+    )
     ap.add_argument("--weather-only", action="store_true")
     ap.add_argument("--meters-only", action="store_true")
+    ap.add_argument("--soiling-only", action="store_true")
+    ap.add_argument("--no-soiling", action="store_true")
     ap.add_argument(
         "--campus",
         default=None,
@@ -469,6 +819,11 @@ def parse_args():
     ap.add_argument("--all-realenergy-meters", action="store_true")
     ap.add_argument("--building-key", action="append", default=None)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--no-pm-climatology",
+        action="store_true",
+        help="HSU soiling: only use measured Open-Meteo PM (~Aug 2022+); skip pre-CAMS hours.",
+    )
     return ap.parse_args()
 
 
@@ -478,18 +833,31 @@ def main() -> int:
         print("Loaded credentials from:", ", ".join(loaded))
 
     args = parse_args()
-    if args.weather_only and args.meters_only:
-        print("ERROR: use at most one of --weather-only / --meters-only", file=sys.stderr)
+    mode_flags = sum(
+        bool(x) for x in (args.weather_only, args.meters_only, args.soiling_only)
+    )
+    if mode_flags > 1:
+        print(
+            "ERROR: use at most one of --weather-only / --meters-only / --soiling-only",
+            file=sys.stderr,
+        )
         return 1
 
     ensure_raw_dir()
     meter_path = raw_meter_path()
     weather_path = raw_solcast_path()
+    hsu_path = raw_hsu_soiling_path()
 
     print("PV_analysis incremental download")
     print(f"  data_raw/: {DATA_RAW_DIR}")
 
-    if not args.meters_only:
+    run_weather = not args.meters_only and not args.soiling_only
+    run_soiling = not args.meters_only and not args.weather_only and not args.no_soiling
+    if args.soiling_only:
+        run_weather = False
+        run_soiling = True
+
+    if run_weather:
         print("\n[Weather] Azure live Solcast →", weather_path)
         try:
             download_weather(out_path=weather_path, campus_filter=args.campus, dry_run=args.dry_run)
@@ -497,7 +865,20 @@ def main() -> int:
             print(e, file=sys.stderr)
             return 1
 
-    if not args.weather_only:
+    if run_soiling:
+        print("\n[HSU soiling] Open-Meteo PM + pvlib ->", hsu_path)
+        try:
+            download_hsu_soiling(
+                out_path=hsu_path,
+                campus_filter=args.campus,
+                dry_run=args.dry_run,
+                pm_climatology=not args.no_pm_climatology,
+            )
+        except SystemExit as e:
+            print(e, file=sys.stderr)
+            return 1
+
+    if not args.weather_only and not args.soiling_only:
         print("\n[Meters] SQL Server →", meter_path)
         engine = build_db_engine()
         try:

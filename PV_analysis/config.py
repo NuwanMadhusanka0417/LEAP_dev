@@ -24,6 +24,8 @@ ENV_FILE = os.path.join(BASE, ".env")
 ENV_EXAMPLE_FILE = os.path.join(BASE, ".env.example")
 DATA_DIR = os.path.join(BASE, "data_cleaned")
 DATA_FOR_VIZ_DIR = os.path.join(BASE, "data_for_viz")
+# HSU soiling hourly series for JS dashboard (published from 0_download_data.py)
+HSU_SOILING_VIZ_CSV = "hsu_soiling_bundoora.csv"
 
 _PLACEHOLDER_VALUES = frozenset({
     "",
