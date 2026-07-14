@@ -40,6 +40,13 @@ def main() -> None:
         def log_message(self, format, *args):
             return  # quieter
 
+        def copyfile(self, source, outputfile):
+            try:
+                super().copyfile(source, outputfile)
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                # Browser cancelled a request (refresh, tab close, large file) — harmless on Windows.
+                pass
+
     print(f"Serving directory: {ROOT}")
     last_err = None
     for port in range(8080, 8090):

@@ -15,7 +15,7 @@ import { renderSeasonPerf } from "./tab_season_perf.js";
 import { renderSeasonIrradiance } from "./tab_season_irradiance.js";
 import { renderMeterDegradation } from "./tab_degradation.js";
 import { renderAllMetersDegradation } from "./tab_all_meters_degradation.js";
-import { renderHealthMonitor } from "./tab_health_monitor.js?v=hm-hsu-soiling-1";
+import { renderHealthMonitor } from "./tab_health_monitor.js?v=hm-hsu-monitor-2";
 import { renderForecast } from "./tab_forecast.js";
 
 let state = {

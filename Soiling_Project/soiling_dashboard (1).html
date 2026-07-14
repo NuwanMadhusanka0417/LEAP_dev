@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Soiling &amp; Cleaning Monitor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root{
+    --bg:#eef1f5; --panel:#ffffff; --ink:#1b2430; --muted:#697586;
+    --line:#e2e7ee; --soil:#d97706; --rain:#2563eb; --loss:#4f46e5; --trend:#0f172a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .wrap{max-width:1180px;margin:0 auto;padding:28px 22px 60px}
+  header h1{margin:0 0 2px;font-size:22px;letter-spacing:-.01em}
+  header p{margin:0 0 22px;color:var(--muted);font-size:13.5px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px}
+  .controls{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;padding:16px 18px;margin-bottom:16px}
+  .ctl{display:flex;flex-direction:column;gap:5px}
+  .ctl label{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+  input[type=date],input[type=number],select{
+    border:1px solid var(--line);border-radius:8px;padding:7px 9px;font-size:14px;background:#fff;color:var(--ink)}
+  .quick{display:flex;gap:6px;flex-wrap:wrap}
+  .quick button,.filebtn{
+    border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:8px;
+    padding:7px 12px;font-size:13px;cursor:pointer;transition:.12s}
+  .quick button:hover,.filebtn:hover{background:#f2f5f9;border-color:#cfd6e0}
+  .quick button.active{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{border:0;background:#fff;padding:7px 14px;font-size:13px;cursor:pointer}
+  .seg button.active{background:var(--soil);color:#fff}
+  .fileinput{display:none}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:16px}
+  .stat{padding:15px 16px}
+  .stat .k{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+  .stat .v{font:600 26px/1.1 ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:6px;letter-spacing:-.02em}
+  .stat .s{font-size:12px;color:var(--muted);margin-top:3px}
+  .chartbox{padding:14px 16px 8px}
+  .chartwrap{position:relative;height:430px}
+  .hint{color:var(--muted);font-size:12.5px;margin-top:10px}
+  @media(max-width:720px){.stats{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Soiling &amp; Cleaning Monitor</h1>
+    <p>HSU soiling ratio with rainfall, and the soiling-rate gradient over any selected window.</p>
+  </header>
+
+  <div class="panel controls">
+    <div class="ctl">
+      <label>View</label>
+      <div class="seg" id="viewSeg">
+        <button data-view="ratio" class="active">Soiling ratio</button>
+        <button data-view="loss">Loss factor</button>
+      </div>
+    </div>
+    <div class="ctl"><label>Start</label><input type="date" id="start"></div>
+    <div class="ctl"><label>End</label><input type="date" id="end"></div>
+    <div class="ctl">
+      <label>Range</label>
+      <div class="quick" id="quick">
+        <button data-m="1">1M</button><button data-m="3">3M</button>
+        <button data-m="6">6M</button><button data-m="12">1Y</button>
+        <button data-m="all" class="active">All</button>
+      </div>
+    </div>
+    <div class="ctl">
+      <label>Clean threshold (mm)</label>
+      <input type="number" id="thresh" value="0.5" step="0.1" min="0" style="width:90px">
+    </div>
+    <div class="ctl">
+      <label>Data</label>
+      <button class="filebtn" id="loadBtn">Load CSV…</button>
+      <input type="file" id="file" class="fileinput" accept=".csv">
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="panel stat"><div class="k">Soiling rate (gradient)</div><div class="v" id="sRate">–</div><div class="s" id="sRateSub">slope over window</div></div>
+    <div class="panel stat"><div class="k">Mean soiling ratio</div><div class="v" id="sMean">–</div><div class="s">1.0 = clean</div></div>
+    <div class="panel stat"><div class="k">Peak loss</div><div class="v" id="sPeak">–</div><div class="s" id="sPeakSub">worst day in window</div></div>
+    <div class="panel stat"><div class="k">Cleaning events</div><div class="v" id="sClean">–</div><div class="s">days ≥ threshold rain</div></div>
+  </div>
+
+  <div class="panel chartbox">
+    <div class="chartwrap"><canvas id="chart"></canvas></div>
+    <div class="hint">The dashed line is the least-squares fit over the selected range; its slope is the soiling rate shown above. Negative = soiling accumulating, positive = net recovery.</div>
+  </div>
+</div>
+
+<script>
+// ---------- state ----------
+let DAILY = [];           // [{t:Date, sr:Number, rain:Number}]
+let view = "ratio";
+let chart;
+
+// ---------- sample data (replace by loading your hsu_soiling_output.csv) ----------
+function makeSample(){
+  const out=[]; let sr=1.0; const start=new Date(Date.UTC(2022,7,1));
+  let rng=12345; const rnd=()=>{rng=(rng*1103515245+12345)&0x7fffffff; return rng/0x7fffffff;};
+  for(let i=0;i<700;i++){
+    const t=new Date(start.getTime()+i*86400000);
+    const rain = rnd()>0.84 ? rnd()*rnd()*22 : 0;       // mm/day, skewed
+    if(rain>=0.5) sr = Math.min(1.0, sr + 0.55*rain/(1+rain));  // cleaning
+    else sr = Math.max(0.90, sr - (0.0010 + 0.0010*rnd()));      // accumulation
+    out.push({t, sr: Math.min(1, sr + (rnd()-0.5)*0.004), rain});
+  }
+  return out;
+}
+
+// ---------- CSV loader (expects col0=timestamp, plus soiling_ratio, rainfall) ----------
+function parseCSV(text){
+  const lines=text.trim().split(/\r?\n/);
+  const head=lines[0].split(",").map(h=>h.trim().toLowerCase());
+  const iSR=head.indexOf("soiling_ratio");
+  const iR=head.indexOf("rainfall");
+  if(iSR<0){alert("CSV needs a 'soiling_ratio' column.");return null;}
+  const rows=[];
+  for(let k=1;k<lines.length;k++){
+    const c=lines[k].split(",");
+    let ts=c[0].trim().replace(" ","T");           // "2023-01-01 00:00:00+00:00" -> ISO
+    const t=new Date(ts);
+    if(isNaN(t)) continue;
+    rows.push({t, sr:parseFloat(c[iSR]), rain:iR>=0?(parseFloat(c[iR])||0):0});
+  }
+  // aggregate to daily (mean SR, sum rain)
+  const map=new Map();
+  for(const r of rows){
+    const d=new Date(Date.UTC(r.t.getUTCFullYear(),r.t.getUTCMonth(),r.t.getUTCDate()));
+    const key=d.getTime();
+    if(!map.has(key)) map.set(key,{t:d,srMin:Infinity,rain:0});
+    const o=map.get(key); o.srMin=Math.min(o.srMin,r.sr); o.rain+=r.rain;  // worst-of-day SR, summed rain
+  }
+  return [...map.values()].sort((a,b)=>a.t-b.t).map(o=>({t:o.t,sr:o.srMin,rain:o.rain}));
+}
+
+// ---------- helpers ----------
+const fmtDate=d=>d.toISOString().slice(0,10);
+function setInputs(s,e){document.getElementById("start").value=fmtDate(s);document.getElementById("end").value=fmtDate(e);}
+function visible(){
+  const s=new Date(document.getElementById("start").value);
+  const e=new Date(document.getElementById("end").value);
+  return DAILY.filter(d=>d.t>=s && d.t<=e);
+}
+// least-squares slope of sr vs day-number
+function slopePerDay(rows){
+  const n=rows.length; if(n<2) return {b:0,a:rows[0]?rows[0].sr:1,t0:rows[0]?rows[0].t:null};
+  const t0=rows[0].t.getTime();
+  let sx=0,sy=0,sxx=0,sxy=0;
+  rows.forEach(r=>{const x=(r.t.getTime()-t0)/86400000,y=r.sr; sx+=x;sy+=y;sxx+=x*x;sxy+=x*y;});
+  const b=(n*sxy-sx*sy)/(n*sxx-sx*sx);
+  const a=(sy-b*sx)/n;
+  return {b,a,t0};
+}
+
+// ---------- render ----------
+function render(){
+  const rows=visible();
+  const thr=parseFloat(document.getElementById("thresh").value)||0;
+  const isLoss=view==="loss";
+  const labels=rows.map(r=>fmtDate(r.t));
+  const yMain=rows.map(r=>isLoss?(1-r.sr):r.sr);
+  const rain=rows.map(r=>r.rain);
+
+  // gradient (always on soiling ratio)
+  const {b,a,t0}=slopePerDay(rows);
+  const fit=rows.map(r=>{const x=(r.t.getTime()-t0)/86400000;const sr=a+b*x;return isLoss?(1-sr):sr;});
+  const ratePctDay=b*100;                       // %/day on soiling ratio
+
+  // stats
+  const meanSR=rows.reduce((s,r)=>s+r.sr,0)/(rows.length||1);
+  const peakLoss=Math.max(0,...rows.map(r=>1-r.sr))*100;
+  const peakDay=rows.length?fmtDate(rows.reduce((m,r)=>(1-r.sr)>(1-m.sr)?r:m).t):"";
+  const cleanN=rows.filter(r=>r.rain>=thr).length;
+
+  document.getElementById("sRate").textContent=(ratePctDay>=0?"+":"")+ratePctDay.toFixed(3)+" %/day";
+  document.getElementById("sRate").style.color = ratePctDay<0?"var(--soil)":"#15803d";
+  document.getElementById("sRateSub").textContent = ratePctDay<0?"soiling (ratio falling)":"net recovery";
+  document.getElementById("sMean").textContent=meanSR.toFixed(4);
+  document.getElementById("sPeak").textContent=peakLoss.toFixed(2)+" %";
+  document.getElementById("sPeakSub").textContent=peakDay?("on "+peakDay):"";
+  document.getElementById("sClean").textContent=cleanN;
+
+  const mainColor=isLoss?getCss("--loss"):getCss("--soil");
+  const cfg={
+    data:{labels,datasets:[
+      {type:"line",label:isLoss?"Loss factor":"Soiling ratio",data:yMain,
+       borderColor:mainColor,backgroundColor:mainColor+"22",borderWidth:1.8,
+       pointRadius:0,tension:0,fill:isLoss,yAxisID:"y",order:2},
+      {type:"line",label:"Fit (slope = soiling rate)",data:fit,
+       borderColor:getCss("--trend"),borderWidth:1.4,borderDash:[6,4],
+       pointRadius:0,tension:0,yAxisID:"y",order:1},
+      {type:"bar",label:"Rainfall (mm)",data:rain,
+       backgroundColor:getCss("--rain")+"99",yAxisID:"y1",order:3,
+       maxBarThickness:6,categoryPercentage:1,barPercentage:1}
+    ]},
+    options:{
+      responsive:true,maintainAspectRatio:false,animation:false,
+      interaction:{mode:"index",intersect:false},
+      scales:{
+        x:{grid:{display:false},ticks:{maxTicksLimit:12,autoSkip:true,maxRotation:0}},
+        y:{position:"left",title:{display:true,text:isLoss?"Loss factor (fraction)":"Soiling ratio (1 = clean)"},
+           suggestedMin:isLoss?0:undefined,grid:{color:getCss("--line")}},
+        y1:{position:"right",title:{display:true,text:"Rainfall (mm)"},
+           grid:{display:false},beginAtZero:true,
+           afterFit:s=>{s.max=Math.max(...rain,1)*3;}}   // keep bars in lower third
+      },
+      plugins:{legend:{labels:{boxWidth:14,font:{size:12}}}}
+    }
+  };
+  if(chart){chart.config.data=cfg.data;chart.config.options=cfg.options;chart.update();}
+  else chart=new Chart(document.getElementById("chart"),cfg);
+}
+function getCss(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim();}
+
+// ---------- quick range ----------
+function applyQuick(m){
+  if(!DAILY.length)return;
+  const end=DAILY[DAILY.length-1].t;
+  let start;
+  if(m==="all") start=DAILY[0].t;
+  else{start=new Date(end); start.setMonth(start.getMonth()-parseInt(m));}
+  if(start<DAILY[0].t) start=DAILY[0].t;
+  setInputs(start,end); render();
+}
+
+// ---------- wire up ----------
+document.getElementById("viewSeg").addEventListener("click",e=>{
+  if(e.target.dataset.view){view=e.target.dataset.view;
+    [...e.currentTarget.children].forEach(b=>b.classList.toggle("active",b===e.target));render();}
+});
+document.getElementById("quick").addEventListener("click",e=>{
+  if(e.target.dataset.m){[...e.currentTarget.children].forEach(b=>b.classList.toggle("active",b===e.target));applyQuick(e.target.dataset.m);}
+});
+["start","end","thresh"].forEach(id=>document.getElementById(id).addEventListener("change",render));
+document.getElementById("loadBtn").addEventListener("click",()=>document.getElementById("file").click());
+document.getElementById("file").addEventListener("change",ev=>{
+  const f=ev.target.files[0]; if(!f)return;
+  const rd=new FileReader();
+  rd.onload=()=>{const d=parseCSV(rd.result); if(d&&d.length){DAILY=d; setInputs(DAILY[0].t,DAILY[DAILY.length-1].t); document.querySelectorAll("#quick button").forEach(b=>b.classList.toggle("active",b.dataset.m==="all")); render();}};
+  rd.readAsText(f);
+});
+
+// ---------- init ----------
+function boot(data){
+  DAILY=data;
+  setInputs(DAILY[0].t,DAILY[DAILY.length-1].t);
+  document.querySelectorAll("#quick button").forEach(b=>b.classList.toggle("active",b.dataset.m==="all"));
+  render();
+}
+// Auto-load from the data folder (works when the page is SERVED over http://,
+// e.g. `python -m http.server`; file:// blocks fetch, so use Load CSV then).
+fetch("data/hsu_soiling_output.csv")
+  .then(r=>{ if(!r.ok) throw new Error("not found"); return r.text(); })
+  .then(t=>{ const d=parseCSV(t); boot(d && d.length ? d : makeSample()); })
+  .catch(()=>boot(makeSample()));
+</script>
+</body>
+</html>
