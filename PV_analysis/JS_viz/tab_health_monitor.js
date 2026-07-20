@@ -861,7 +861,7 @@ function kimberTablesHtml(kimber) {
 
 
 
-/** Hourly HSU CSV -> daily min SR + summed rain (matches Soiling Project dashboard). */
+/** Hourly HSU CSV -> daily mean SR + summed rain (matches Soiling Project dashboard). */
 function parseHsuHourlyToDaily(text) {
   const { headers, rows } = parseCSV(text);
   if (!rows.length) return [];
@@ -881,8 +881,9 @@ function parseHsuHourlyToDaily(text) {
     const rain = iR >= 0 ? Number(r[headers[iR]]) || 0 : 0;
     const day = t.toISOString().slice(0, 10);
     let o = byDay.get(day);
-    if (!o) o = { day, srMin: Infinity, rain: 0 };
-    o.srMin = Math.min(o.srMin, sr);
+    if (!o) o = { day, srSum: 0, n: 0, rain: 0 };
+    o.srSum += sr;
+    o.n += 1;
     o.rain += rain;
     byDay.set(day, o);
   }
@@ -890,9 +891,9 @@ function parseHsuHourlyToDaily(text) {
     .sort((a, b) => a.day.localeCompare(b.day))
     .map((o) => ({
       day: o.day,
-      sr: o.srMin,
+      sr: o.srSum / o.n,
       rain: o.rain,
-      loss: 1 - o.srMin,
+      loss: 1 - o.srSum / o.n,
     }));
 }
 
@@ -938,10 +939,6 @@ function computeHsuEnergyAnalysis(hsuDaily, kimberDaily) {
   }
 
   const fit = hsuSlopePerDay(hsuDaily);
-  const fitLoss = fit.days.map((day, i) => ({
-    day,
-    loss: Math.max(0, 1 - (fit.intercept + fit.slope * fit.xs[i])),
-  }));
   const meanSR = mean(hsuDaily.map((d) => d.sr));
   const peakLoss = Math.max(0, ...hsuDaily.map((d) => d.loss));
   const peakDay = hsuDaily.find((d) => d.loss === peakLoss)?.day ?? "";
@@ -949,7 +946,6 @@ function computeHsuEnergyAnalysis(hsuDaily, kimberDaily) {
   return {
     daily,
     cleanings,
-    fitLoss,
     summary: {
       ratePctPerDay: fit.slope * 100,
       meanSR,
@@ -1071,28 +1067,119 @@ function hsuMonitorStatsHtml(stats) {
 
 
 
-function hsuMonitorControlsHtml(start, end, threshold) {
-  return `<div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;padding:0;font-size:0.82rem">
-    <div style="display:flex;flex-direction:column;gap:4px">
-      <span style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.05em;color:#64748b">View</span>
-      <div class="hsu-view-seg" style="display:inline-flex;border:1px solid #475569;border-radius:6px;overflow:hidden">
-        <button type="button" data-hsu-view="ratio" class="hsu-view-btn active" style="border:0;background:#d97706;color:#fff;padding:6px 12px;cursor:pointer;font-size:0.82rem">Soiling ratio</button>
-        <button type="button" data-hsu-view="loss" class="hsu-view-btn" style="border:0;background:#0f172a;color:#e2e8f0;padding:6px 12px;cursor:pointer;font-size:0.82rem">Loss factor</button>
-      </div>
-    </div>
-    <label style="display:flex;flex-direction:column;gap:4px;color:#94a3b8">Start<input type="date" class="hsu-start" value="${start}" style="border:1px solid #475569;border-radius:6px;padding:5px 8px;background:#0f172a;color:#e2e8f0"></label>
-    <label style="display:flex;flex-direction:column;gap:4px;color:#94a3b8">End<input type="date" class="hsu-end" value="${end}" style="border:1px solid #475569;border-radius:6px;padding:5px 8px;background:#0f172a;color:#e2e8f0"></label>
-    <div style="display:flex;flex-direction:column;gap:4px">
-      <span style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.05em;color:#64748b">Range</span>
-      <div class="hsu-quick" style="display:flex;gap:4px;flex-wrap:wrap">
-        ${["1", "3", "6", "12"].map((m) => `<button type="button" data-hsu-m="${m}" class="hsu-quick-btn${m === "3" ? " active" : ""}" style="border:1px solid #475569;background:${m === "3" ? "#e2e8f0" : "#0f172a"};color:${m === "3" ? "#0f172a" : "#e2e8f0"};border-radius:6px;padding:5px 10px;cursor:pointer">${m === "12" ? "1Y" : `${m}M`}</button>`).join("")}
-        <button type="button" data-hsu-m="all" class="hsu-quick-btn" style="border:1px solid #475569;background:#0f172a;color:#e2e8f0;border-radius:6px;padding:5px 10px;cursor:pointer">All</button>
-      </div>
-    </div>
-    <label style="display:flex;flex-direction:column;gap:4px;color:#94a3b8">Clean threshold (mm)<input type="number" class="hsu-thresh" value="${threshold}" step="0.1" min="0" style="width:88px;border:1px solid #475569;border-radius:6px;padding:5px 8px;background:#0f172a;color:#e2e8f0"></label>
-  </div>`;
+function isoDayFromPlotlyAxis(v) {
+  const s = String(v);
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? s.slice(0, 10) : d.toISOString().slice(0, 10);
 }
 
+
+
+function clampHsuDayRange(hsuDaily, startDay, endDay) {
+  if (!hsuDaily.length) return { start: startDay, end: endDay };
+  const lo = hsuDaily[0].day;
+  const hi = hsuDaily[hsuDaily.length - 1].day;
+  let start = startDay && startDay > lo ? startDay : lo;
+  let end = endDay && endDay < hi ? endDay : hi;
+  if (startDay && startDay > hi) start = hi;
+  if (endDay && endDay < lo) end = lo;
+  if (start > end) end = start;
+  return { start, end };
+}
+
+
+
+function refreshHsuMonitorChart(elChart, statsId, startDay, endDay, width) {
+  const hsuDaily = elChart.__hsuDaily;
+  if (!hsuDaily?.length) return;
+  const { start, end } = clampHsuDayRange(hsuDaily, startDay, endDay);
+  const rows = filterHsuDailyByRange(hsuDaily, start, end);
+  const elStats = document.getElementById(statsId);
+  if (!rows.length) {
+    if (elStats) elStats.innerHTML = `<p style="color:#94a3b8">No HSU data in selected range.</p>`;
+    return;
+  }
+  const stats = computeHsuMonitorStats(rows, HSU_CLEANING_THRESHOLD_MM);
+  if (elStats) elStats.innerHTML = hsuMonitorStatsHtml(stats);
+  const w = width || elChart.__hsuWidth || 960;
+  const spec = buildHsuMonitorChart(rows, stats, "ratio", w);
+  spec.layout.xaxis = {
+    ...spec.layout.xaxis,
+    range: [start, end],
+    autorange: false,
+  };
+  elChart.__hsuSyncing = true;
+  const plotFn = elChart.data ? Plotly.react : Plotly.newPlot;
+  const done = plotFn(elChart, spec.traces, spec.layout, HM_PLOTLY_CONFIG);
+  if (done?.finally) {
+    done.finally(() => {
+      elChart.__hsuSyncing = false;
+    });
+  } else {
+    elChart.__hsuSyncing = false;
+  }
+}
+
+
+
+function initHsuMonitorPanel(hsuDaily, { statsId, chartId, width, dateFrom, dateTo }) {
+  const elChart = document.getElementById(chartId);
+  const elStats = document.getElementById(statsId);
+  if (!elChart || !elStats || !hsuDaily.length) return null;
+
+  elChart.__hsuDaily = hsuDaily;
+  elChart.__hsuWidth = width;
+  elChart.__hsuStatsId = statsId;
+
+  const initial = clampHsuDayRange(
+    hsuDaily,
+    dateFrom || hsuDaily[0].day,
+    dateTo || hsuDaily[hsuDaily.length - 1].day,
+  );
+  refreshHsuMonitorChart(elChart, statsId, initial.start, initial.end, width);
+
+  elChart.on("plotly_relayout", (ev) => {
+    if (elChart.__hsuSyncing) return;
+    const range = xRangeFromRelayout(ev);
+    if (range === undefined) return;
+    if (range === null) {
+      refreshHsuMonitorChart(
+        elChart,
+        statsId,
+        hsuDaily[0].day,
+        hsuDaily[hsuDaily.length - 1].day,
+        width,
+      );
+      return;
+    }
+    refreshHsuMonitorChart(
+      elChart,
+      statsId,
+      isoDayFromPlotlyAxis(range[0]),
+      isoDayFromPlotlyAxis(range[1]),
+      width,
+    );
+  });
+
+  return elChart;
+}
+
+
+
+function applyHealthMonitorDateRange(chartEls, dateFrom, dateTo) {
+  if (!dateFrom || !dateTo || !chartEls?.length) return;
+  const range = [dateFrom, dateTo];
+  const els = chartEls.filter((el) => el?.data);
+  if (!els.length) return;
+  Plotly.relayout(els[0], { "xaxis.range": range, "xaxis.autorange": false });
+}
+
+
+
+function renderHsuMonitorPanel(hsuDaily, { statsId, chartId, width, dateFrom, dateTo }) {
+  return initHsuMonitorPanel(hsuDaily, { statsId, chartId, width, dateFrom, dateTo });
+}
 
 
 function filterHsuDailyByRange(hsuDaily, startDay, endDay) {
@@ -1192,224 +1279,6 @@ function buildHsuMonitorChart(rows, stats, viewMode, width) {
       barmode: "overlay",
     },
   };
-}
-
-
-
-function mountHsuMonitorPanel(hsuDaily, { controlsId, statsId, chartId, width }) {
-  const elChart = document.getElementById(chartId);
-  const elControls = document.getElementById(controlsId);
-  const elStats = document.getElementById(statsId);
-  if (!elChart || !elControls || !elStats || !hsuDaily.length) return null;
-
-  const state = {
-    view: "ratio",
-    threshold: HSU_CLEANING_THRESHOLD_MM,
-    ...defaultHsuMonitorRange(hsuDaily, 3),
-  };
-
-  function readControlsFromDom() {
-    const startEl = elControls.querySelector(".hsu-start");
-    const endEl = elControls.querySelector(".hsu-end");
-    const thrEl = elControls.querySelector(".hsu-thresh");
-    if (startEl?.value) state.start = startEl.value;
-    if (endEl?.value) state.end = endEl.value;
-    if (thrEl?.value) state.threshold = parseFloat(thrEl.value) || HSU_CLEANING_THRESHOLD_MM;
-  }
-
-  function renderMonitor() {
-    readControlsFromDom();
-    const rows = filterHsuDailyByRange(hsuDaily, state.start, state.end);
-    if (!rows.length) {
-      elStats.innerHTML = `<p style="color:#94a3b8">No HSU data in selected range.</p>`;
-      Plotly.purge(elChart);
-      return;
-    }
-    const stats = computeHsuMonitorStats(rows, state.threshold);
-    elStats.innerHTML = hsuMonitorStatsHtml(stats);
-    const spec = buildHsuMonitorChart(rows, stats, state.view, width);
-    Plotly.react(elChart, spec.traces, spec.layout, HM_PLOTLY_CONFIG);
-  }
-
-  elControls.querySelectorAll(".hsu-view-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      state.view = btn.dataset.hsuView || "ratio";
-      elControls.querySelectorAll(".hsu-view-btn").forEach((b) => {
-        const on = b === btn;
-        b.classList.toggle("active", on);
-        b.style.background = on ? "#d97706" : "#0f172a";
-        b.style.color = on ? "#fff" : "#e2e8f0";
-      });
-      renderMonitor();
-    });
-  });
-
-  elControls.querySelectorAll(".hsu-quick-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const m = btn.dataset.hsuM;
-      elControls.querySelectorAll(".hsu-quick-btn").forEach((b) => {
-        const on = b === btn;
-        b.style.background = on ? "#e2e8f0" : "#0f172a";
-        b.style.color = on ? "#0f172a" : "#e2e8f0";
-      });
-      if (m === "all") {
-        state.start = hsuDaily[0].day;
-        state.end = hsuDaily[hsuDaily.length - 1].day;
-      } else {
-        const range = defaultHsuMonitorRange(hsuDaily, parseInt(m, 10));
-        state.start = range.start;
-        state.end = range.end;
-      }
-      elControls.querySelector(".hsu-start").value = state.start;
-      elControls.querySelector(".hsu-end").value = state.end;
-      renderMonitor();
-    });
-  });
-
-  for (const sel of [".hsu-start", ".hsu-end", ".hsu-thresh"]) {
-    elControls.querySelector(sel)?.addEventListener("change", renderMonitor);
-  }
-
-  renderMonitor();
-  return elChart;
-}
-
-
-
-function buildHsuLossChart(hsu, width) {
-  const { daily, fitLoss, cleanings } = hsu;
-  const days = daily.map((d) => d.day);
-  const rain = daily.map((d) => d.rain);
-  const theme = plotlyDarkTheme();
-  const rainMax = Math.max(...rain, 1);
-
-  const shapes = cleanings.map((c) => ({
-    type: "line",
-    x0: c.day,
-    x1: c.day,
-    y0: 0,
-    y1: 1,
-    yref: "paper",
-    line: { color: "#2563eb", width: 1, dash: "dot" },
-  }));
-
-  return {
-    traces: [
-      {
-        x: days,
-        y: daily.map((d) => d.loss),
-        type: "scatter",
-        mode: "lines",
-        name: "HSU loss factor",
-        line: { color: "#d97706", width: 2 },
-        yaxis: "y",
-        hovertemplate: "%{x}<br>loss = %{y:.2%}<extra></extra>",
-      },
-      {
-        x: fitLoss.map((d) => d.day),
-        y: fitLoss.map((d) => d.loss),
-        type: "scatter",
-        mode: "lines",
-        name: "Fit (soiling rate)",
-        line: { color: "#cbd5e1", width: 1.4, dash: "dash" },
-        yaxis: "y",
-        hovertemplate: "%{x}<br>fit = %{y:.2%}<extra></extra>",
-      },
-      {
-        x: days,
-        y: rain,
-        type: "bar",
-        name: "Rainfall (mm)",
-        marker: { color: "rgba(37,99,235,0.55)" },
-        yaxis: "y2",
-        hovertemplate: "%{x}<br>rain = %{y:.2f} mm<extra></extra>",
-      },
-    ],
-    layout: {
-      ...theme,
-      autosize: false,
-      width,
-      height: 340,
-      title: {
-        text: "Soiling loss (pvlib HSU, Bundoora)",
-        font: { color: "#e2e8f0", size: 12 },
-      },
-      margin: { t: 36, r: 48, b: 40, l: 52 },
-      xaxis: { ...theme.xaxis, type: "date" },
-      yaxis: {
-        ...theme.yaxis,
-        title: "Loss factor",
-        tickformat: ".1%",
-        rangemode: "tozero",
-      },
-      yaxis2: {
-        title: "Rain (mm)",
-        overlaying: "y",
-        side: "right",
-        range: [0, rainMax * 3],
-        showgrid: false,
-        zeroline: false,
-      },
-      shapes,
-      showlegend: true,
-      legend: { orientation: "h", y: 1.12, x: 0, font: { size: 10 } },
-      hovermode: "x unified",
-      barmode: "overlay",
-    },
-  };
-}
-
-
-
-function buildHsuCumLossChart(hsu, width) {
-  const { daily } = hsu;
-  const theme = plotlyDarkTheme();
-  return {
-    traces: [
-      {
-        x: daily.map((d) => d.day),
-        y: daily.map((d) => d.cumLossKwh),
-        type: "scatter",
-        mode: "lines",
-        name: "Cumulative loss",
-        line: { color: "#f59e0b", width: 2 },
-        hovertemplate: "%{x}<br>Cumulative = %{y:.0f} kWh<extra></extra>",
-      },
-    ],
-    layout: {
-      ...theme,
-      autosize: false,
-      width,
-      height: 200,
-      title: {
-        text: "Cumulative energy lost since last rain clean (HSU)",
-        font: { color: "#e2e8f0", size: 12 },
-      },
-      margin: { t: 32, r: 16, b: 36, l: 52 },
-      xaxis: { ...theme.xaxis, type: "date", showticklabels: false },
-      yaxis: { ...theme.yaxis, title: "Cumulative kWh lost" },
-      showlegend: false,
-      hovermode: "x unified",
-    },
-  };
-}
-
-
-
-function plotHsuCharts(hsu, ids, width) {
-  const elLoss = document.getElementById(ids.sr);
-  const elCum = document.getElementById(ids.cum);
-  if (!elLoss || !elCum) return [];
-  const lossSpec = buildHsuLossChart(hsu, width);
-  Plotly.newPlot(elLoss, lossSpec.traces, lossSpec.layout, HM_PLOTLY_CONFIG);
-  const cumSpec = buildHsuCumLossChart(hsu, width);
-  Plotly.newPlot(elCum, cumSpec.traces, cumSpec.layout, HM_PLOTLY_CONFIG);
-  const elProj = document.getElementById(ids.proj);
-  if (elProj) {
-    elProj.style.display = "none";
-    elProj.innerHTML = "";
-  }
-  return [elLoss, elCum];
 }
 
 
@@ -3782,7 +3651,7 @@ function alarmTableHtml(events) {
 /**
  * @param {HTMLElement} container
  * @param {Array} hourly
- * @param {object} [site]
+ * @param {object} [site] `{ key, label, dateFrom?, dateTo? }`
  */
 export function renderHealthMonitor(container, hourly, site = {}) {
   purgePlotlyInContainer(container);
@@ -3819,16 +3688,12 @@ export function renderHealthMonitor(container, hourly, site = {}) {
   const idSoilGhi = nextPlotDomId("hm-soil-ghi");
   const idWeatherStats = nextPlotDomId("hm-wx-stats");
   const idWeatherTables = nextPlotDomId("hm-wx-tables");
-  const idHsuMonitorControls = nextPlotDomId("hm-hsu-mon-ctrl");
   const idHsuMonitorStats = nextPlotDomId("hm-hsu-mon-stats");
   const idHsuMonitorChart = nextPlotDomId("hm-hsu-mon-chart");
   const idKimberValid = nextPlotDomId("hm-kimber-valid");
   const idKimberDecision = nextPlotDomId("hm-kimber-decision");
   const idKimberStats = nextPlotDomId("hm-kimber-stats");
   const idKimberTables = nextPlotDomId("hm-kimber-tables");
-  const idKimberSr = nextPlotDomId("hm-kimber-sr");
-  const idKimberCum = nextPlotDomId("hm-kimber-cum");
-  const idKimberProj = nextPlotDomId("hm-kimber-proj");
   const gen = (container.__hmGen = (container.__hmGen || 0) + 1);
   container.innerHTML = `
     <div style="padding:16px">
@@ -3848,18 +3713,12 @@ export function renderHealthMonitor(container, hourly, site = {}) {
       <h3 style="font-size:0.92rem;color:#cbd5e1;margin:24px 0 0">Weather &amp; performance analysis</h3>
       <div id="${idKimberDecision}">${hsuLoading}</div>
       <h3 style="font-size:0.92rem;color:#cbd5e1;margin:20px 0 4px">Soiling &amp; cleaning monitor (HSU)</h3>
-      <p class="note" style="margin:0 0 8px">Same view as the Soiling Project dashboard: daily soiling ratio, rainfall, and a least-squares fit over the <em>selected date window</em> (not the full history).</p>
-      <div id="${idHsuMonitorControls}" style="margin:12px 0;padding:12px 14px;background:#1e293b;border:1px solid #334155;border-radius:8px"></div>
       <div id="${idHsuMonitorStats}">${hsuLoading}</div>
       <div id="${idHsuMonitorChart}" class="chart-box" style="height:430px;min-height:430px;margin-bottom:16px;width:100%;overflow:hidden"></div>
       ${soilingHowItWorksHtml()}
       <p class="note" style="margin:8px 0 12px">All charts share the same date range  - pan or box-select on any panel to align EWMA, health ratio (H), HSU soiling, and weather views.
         Double-click a chart to reset the range on all panels.</p>
       <div id="${idSoilH}" class="chart-box" style="height:340px;min-height:340px;margin-bottom:4px;width:100%;overflow:hidden"></div>
-      <div id="${idKimberSr}" class="chart-box" style="height:340px;min-height:340px;margin-bottom:4px;width:100%;overflow:hidden"></div>
-      <p class="note" style="margin:0 0 6px;font-size:0.78rem">Energy impact charts below use loss factor (1 &minus; SR) aligned to meter expected energy.</p>
-      <div id="${idKimberCum}" class="chart-box" style="height:200px;min-height:200px;margin-bottom:4px;width:100%;overflow:hidden"></div>
-      <div id="${idKimberProj}" class="chart-box" style="display:none;height:0;min-height:0;margin:0;padding:0;overflow:hidden"></div>
       <div id="${idSoilRain}" class="chart-box" style="height:170px;min-height:170px;margin-bottom:4px;width:100%;overflow:hidden"></div>
       <div id="${idSoilWind}" class="chart-box" style="height:170px;min-height:170px;margin-bottom:4px;width:100%;overflow:hidden"></div>
       <div id="${idSoilTemp}" class="chart-box" style="height:170px;min-height:170px;margin-bottom:4px;width:100%;overflow:hidden"></div>
@@ -3934,7 +3793,7 @@ export function renderHealthMonitor(container, hourly, site = {}) {
       const decisionEl = document.getElementById(idKimberDecision);
       const statsEl = document.getElementById(idKimberStats);
       const tablesEl = document.getElementById(idKimberTables);
-      const elSr = document.getElementById(idKimberSr);
+      const monChart = document.getElementById(idHsuMonitorChart);
 
       if (!hsuRes?.text) {
         const msg =
@@ -3945,53 +3804,33 @@ export function renderHealthMonitor(container, hourly, site = {}) {
         if (tablesEl) tablesEl.innerHTML = "";
         const monStats = document.getElementById(idHsuMonitorStats);
         if (monStats) monStats.innerHTML = msg;
-        if (elSr) elSr.innerHTML = msg;
-        const elCum = document.getElementById(idKimberCum);
-        if (elCum) elCum.innerHTML = "";
+        if (monChart) monChart.innerHTML = msg;
       } else {
         const hsuDaily = parseHsuHourlyToDaily(hsuRes.text);
         if (!hsuDaily.length) {
           throw new Error("HSU CSV parsed to zero daily rows.");
         }
-        const range = defaultHsuMonitorRange(hsuDaily, 3);
-        const controlsEl = document.getElementById(idHsuMonitorControls);
-        if (controlsEl) {
-          controlsEl.innerHTML = hsuMonitorControlsHtml(
-            range.start,
-            range.end,
-            HSU_CLEANING_THRESHOLD_MM,
-          );
-        }
         const hsu = computeHsuEnergyAnalysis(hsuDaily, kd);
         if (decisionEl) decisionEl.innerHTML = hsuDataBannerHtml(hsuRes.url);
         if (statsEl) statsEl.innerHTML = hsuStatsHtml(hsu.summary);
         if (tablesEl) tablesEl.innerHTML = hsuTablesHtml(hsu);
-        const monEl = mountHsuMonitorPanel(hsuDaily, {
-          controlsId: idHsuMonitorControls,
+        const monEl = initHsuMonitorPanel(hsuDaily, {
           statsId: idHsuMonitorStats,
           chartId: idHsuMonitorChart,
           width: w,
+          dateFrom: site.dateFrom,
+          dateTo: site.dateTo,
         });
         if (monEl) linkedCharts.push(monEl);
-        linkedCharts.push(
-          ...plotHsuCharts(
-            hsu,
-            {
-              sr: idKimberSr,
-              cum: idKimberCum,
-              proj: idKimberProj,
-            },
-            w,
-          ),
-        );
       }
     } catch (err) {
       console.error("[HealthMonitor] HSU soiling plot error", err);
-      const elSr = document.getElementById(idKimberSr);
-      if (elSr) {
-        elSr.innerHTML = `<p style="color:#f87171;padding:1rem;font-size:0.85rem">${err.message}</p>`;
+      const monChart = document.getElementById(idHsuMonitorChart);
+      if (monChart) {
+        monChart.innerHTML = `<p style="color:#f87171;padding:1rem;font-size:0.85rem">${err.message}</p>`;
       }
     }
     wireHealthMonitorLinkedAxes(linkedCharts);
+    applyHealthMonitorDateRange(linkedCharts, site.dateFrom, site.dateTo);
   }, 150);
 }
