@@ -2097,6 +2097,33 @@ function measurePlotWidth(el, panel) {
   if (rect && rect.width > 80) return Math.floor(rect.width);
   return Math.max(480, Math.floor(panel?.clientWidth || 960) - 32);
 }
+
+function wireHmOptionalChartsPanel(detailsEl, onFirstOpen) {
+  if (!detailsEl || detailsEl.__hmOptionalWired) return;
+  detailsEl.__hmOptionalWired = true;
+  detailsEl.addEventListener("toggle", async () => {
+    if (!detailsEl.open) return;
+    if (detailsEl.__hmPlotted) {
+      for (const el of detailsEl.__hmChartEls || []) {
+        if (el?.data) Plotly.Plots.resize(el);
+      }
+      return;
+    }
+    try {
+      detailsEl.__hmChartEls = (await onFirstOpen()) || [];
+      detailsEl.__hmPlotted = true;
+    } catch (err) {
+      console.error("[HealthMonitor] optional charts error", err);
+      const body = detailsEl.querySelector(".hm-optional-charts-body");
+      if (body) {
+        body.insertAdjacentHTML(
+          "afterbegin",
+          `<p style="color:#f87171;padding:0.5rem 0;font-size:0.85rem">${err.message}</p>`,
+        );
+      }
+    }
+  });
+}
 // --- Weather & performance analysis ---
 function soilingHowItWorksHtml() {
   return `<details style="margin:8px 0 12px;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:0 14px">
@@ -3680,7 +3707,7 @@ export function renderHealthMonitor(container, hourly, site = {}) {
   const weather = computeWeatherImpactAnalysis(weatherDaily);
   const hsuLoading = `<p style="color:#94a3b8;font-size:0.85rem;margin:8px 0">Loading HSU soiling data…</p>`;
   const idBanner = nextPlotDomId("hm-banner");
-  const idEwma = nextPlotDomId("hm-ewma");
+  const idOptionalCharts = nextPlotDomId("hm-optional-charts");
   const idSoilH = nextPlotDomId("hm-soil-h");
   const idSoilRain = nextPlotDomId("hm-soil-rain");
   const idSoilWind = nextPlotDomId("hm-soil-wind");
@@ -3697,10 +3724,10 @@ export function renderHealthMonitor(container, hourly, site = {}) {
   const gen = (container.__hmGen = (container.__hmGen || 0) + 1);
   container.innerHTML = `
     <div style="padding:16px">
-      <h2>${siteHeading("Health monitor (EWMA)", site)}</h2>
+      <h2>${siteHeading("Health monitor", site)}</h2>
       <p class="note">
-        Detects abnormal sustained underperformance after removing seasonal H patterns.
-        Alarms trigger when the EWMA of the residual drops below the lower control limit (LCL).
+        HSU soiling monitor with EWMA-based status summary. Expand the optional section below for
+        health ratio (H), rainfall, wind, temperature, and GHI charts.
       </p>
       <div id="${idBanner}" style="background:#1e293b;border:1px solid ${status.color};
         border-radius:10px;padding:14px 18px;margin:12px 0 0">
@@ -3708,21 +3735,26 @@ export function renderHealthMonitor(container, hourly, site = {}) {
         <div style="color:#94a3b8;font-size:0.85rem;margin-top:4px">${status.summary}</div>
       </div>
       ${howItWorksHtml()}
-      <h3 style="font-size:0.92rem;color:#cbd5e1;margin:16px 0 8px">EWMA control chart</h3>
-      <div id="${idEwma}" class="chart-box" style="height:380px;min-height:380px;margin-bottom:16px;width:100%;overflow:hidden"></div>
       <h3 style="font-size:0.92rem;color:#cbd5e1;margin:24px 0 0">Weather &amp; performance analysis</h3>
       <div id="${idKimberDecision}">${hsuLoading}</div>
       <h3 style="font-size:0.92rem;color:#cbd5e1;margin:20px 0 4px">Soiling &amp; cleaning monitor (HSU)</h3>
       <div id="${idHsuMonitorStats}">${hsuLoading}</div>
       <div id="${idHsuMonitorChart}" class="chart-box" style="height:430px;min-height:430px;margin-bottom:16px;width:100%;overflow:hidden"></div>
       ${soilingHowItWorksHtml()}
-      <p class="note" style="margin:8px 0 12px">All charts share the same date range  - pan or box-select on any panel to align EWMA, health ratio (H), HSU soiling, and weather views.
-        Double-click a chart to reset the range on all panels.</p>
-      <div id="${idSoilH}" class="chart-box" style="height:340px;min-height:340px;margin-bottom:4px;width:100%;overflow:hidden"></div>
-      <div id="${idSoilRain}" class="chart-box" style="height:170px;min-height:170px;margin-bottom:4px;width:100%;overflow:hidden"></div>
-      <div id="${idSoilWind}" class="chart-box" style="height:170px;min-height:170px;margin-bottom:4px;width:100%;overflow:hidden"></div>
-      <div id="${idSoilTemp}" class="chart-box" style="height:170px;min-height:170px;margin-bottom:4px;width:100%;overflow:hidden"></div>
-      <div id="${idSoilGhi}" class="chart-box" style="height:170px;min-height:170px;margin-bottom:12px;width:100%;overflow:hidden"></div>
+      <details id="${idOptionalCharts}" style="margin:16px 0;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:0 14px">
+        <summary style="cursor:pointer;padding:12px 0;font-size:0.9rem;color:#cbd5e1;font-weight:500">
+          Performance &amp; weather charts (optional)
+        </summary>
+        <div class="hm-optional-charts-body" style="padding:0 0 14px 0">
+          <p class="note" style="margin:8px 0 12px">Health ratio (H) smoothed trend, daily rainfall, max wind speed, daylight mean temperature, and daylight GHI.
+            Pan or box-select on any panel to align with the HSU chart; double-click to reset the range.</p>
+          <div id="${idSoilH}" class="chart-box" style="height:340px;min-height:340px;margin-bottom:4px;width:100%;overflow:hidden"></div>
+          <div id="${idSoilRain}" class="chart-box" style="height:170px;min-height:170px;margin-bottom:4px;width:100%;overflow:hidden"></div>
+          <div id="${idSoilWind}" class="chart-box" style="height:170px;min-height:170px;margin-bottom:4px;width:100%;overflow:hidden"></div>
+          <div id="${idSoilTemp}" class="chart-box" style="height:170px;min-height:170px;margin-bottom:4px;width:100%;overflow:hidden"></div>
+          <div id="${idSoilGhi}" class="chart-box" style="height:170px;min-height:170px;margin-bottom:12px;width:100%;overflow:hidden"></div>
+        </div>
+      </details>
       <div id="${idKimberValid}"></div>
       ${hsuHowItWorksHtml()}
       <div id="${idKimberStats}">${hsuLoading}</div>
@@ -3732,54 +3764,13 @@ export function renderHealthMonitor(container, hourly, site = {}) {
     </div>`;
   setTimeout(async () => {
     if (!container.isConnected || container.__hmGen !== gen) return;
-    const elEwma = document.getElementById(idEwma);
-    if (!elEwma) return;
+    const elHsu = document.getElementById(idHsuMonitorChart);
+    if (!elHsu) return;
     void container.offsetWidth;
-    const w = Math.max(480, measurePlotWidth(elEwma, container));
+    const w = Math.max(480, measurePlotWidth(elHsu, container));
     const linkedCharts = [];
-    try {
-      const ewma = buildEwmaChart(analysis, w);
-      Plotly.newPlot(elEwma, ewma.traces, ewma.layout, HM_PLOTLY_CONFIG);
-      linkedCharts.push(elEwma);
-    } catch (err) {
-      console.error("[HealthMonitor] EWMA plot error", err);
-      elEwma.innerHTML = `<p style="color:#f87171;padding:1rem;font-size:0.85rem">${err.message}</p>`;
-    }
-    try {
-      let wxDaily = computeWeatherDaily(hourly);
-      try {
-        const rows = await fetchWeatherEnrichmentRows(site);
-        enrichDailyWithRawWeather(wxDaily, rows);
-      } catch (fetchErr) {
-        console.warn("[HealthMonitor] weather enrichment not loaded", fetchErr);
-      }
-      const wx = computeWeatherImpactAnalysis(wxDaily);
-      const windOk = wx.summary.hasWind;
-      const statsEl = document.getElementById(idWeatherStats);
-      const tablesEl = document.getElementById(idWeatherTables);
-      if (statsEl) statsEl.innerHTML = soilingStatsHtml(wx.summary);
-      if (tablesEl) tablesEl.innerHTML = weatherTablesHtml(wx);
-      const elWind = document.getElementById(idSoilWind);
-      if (elWind && !windOk) {
-        elWind.innerHTML = `<p style="color:#94a3b8;padding:1.2rem;font-size:0.85rem;text-align:center">No wind column in hourly master CSV (expected <code>wind_speed_10m</code> from Solcast).</p>`;
-        elWind.style.height = "80px";
-        elWind.style.minHeight = "80px";
-      }
-      linkedCharts.push(
-        ...plotWeatherPanels(
-          wx,
-          { h: idSoilH, rain: idSoilRain, wind: idSoilWind, temp: idSoilTemp, ghi: idSoilGhi },
-          w,
-          windOk,
-        ),
-      );
-    } catch (err) {
-      console.error("[HealthMonitor] weather plot error", err);
-      const elH = document.getElementById(idSoilH);
-      if (elH) {
-        elH.innerHTML = `<p style="color:#f87171;padding:1rem;font-size:0.85rem">${err.message}</p>`;
-      }
-    }
+    const detailsEl = document.getElementById(idOptionalCharts);
+
     try {
       let kd = computeKimberDaily(hourly);
       try {
@@ -3830,7 +3821,40 @@ export function renderHealthMonitor(container, hourly, site = {}) {
         monChart.innerHTML = `<p style="color:#f87171;padding:1rem;font-size:0.85rem">${err.message}</p>`;
       }
     }
-    wireHealthMonitorLinkedAxes(linkedCharts);
+
+    wireHmOptionalChartsPanel(detailsEl, async () => {
+      let wxDaily = computeWeatherDaily(hourly);
+      try {
+        const rows = await fetchWeatherEnrichmentRows(site);
+        enrichDailyWithRawWeather(wxDaily, rows);
+      } catch (fetchErr) {
+        console.warn("[HealthMonitor] weather enrichment not loaded", fetchErr);
+      }
+      const wx = computeWeatherImpactAnalysis(wxDaily);
+      const windOk = wx.summary.hasWind;
+      const statsEl = document.getElementById(idWeatherStats);
+      const tablesEl = document.getElementById(idWeatherTables);
+      if (statsEl) statsEl.innerHTML = soilingStatsHtml(wx.summary);
+      if (tablesEl) tablesEl.innerHTML = weatherTablesHtml(wx);
+      const elWind = document.getElementById(idSoilWind);
+      if (elWind && !windOk) {
+        elWind.innerHTML =
+          `<p style="color:#94a3b8;padding:1.2rem;font-size:0.85rem;text-align:center">No wind column in hourly master CSV (expected <code>wind_speed_10m</code> from Solcast).</p>`;
+        elWind.style.height = "80px";
+        elWind.style.minHeight = "80px";
+      }
+      const wxEls = plotWeatherPanels(
+        wx,
+        { h: idSoilH, rain: idSoilRain, wind: idSoilWind, temp: idSoilTemp, ghi: idSoilGhi },
+        w,
+        windOk,
+      );
+      const allLinked = [...linkedCharts, ...wxEls];
+      wireHealthMonitorLinkedAxes(allLinked);
+      applyHealthMonitorDateRange(allLinked, site.dateFrom, site.dateTo);
+      return wxEls;
+    });
+
     applyHealthMonitorDateRange(linkedCharts, site.dateFrom, site.dateTo);
   }, 150);
 }
